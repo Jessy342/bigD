@@ -20,6 +20,14 @@ VOWELS = set("AEIOU")
 
 DIFFICULTY_LABELS = ["easy", "medium", "hard", "expert", "master", "legend"]
 
+DEFAULT_EASY_WORDS = [
+    "ABOUT", "APPLE", "BEACH", "BREAD", "BRAVE", "BROWN", "CHAIR", "CRANE",
+    "DANCE", "EARTH", "FRUIT", "GRASS", "GREEN", "HEART", "HOUSE", "LIGHT",
+    "MONEY", "MUSIC", "OCEAN", "PAPER", "PARTY", "PHONE", "PLANT", "QUIET",
+    "RIVER", "SMILE", "SPACE", "STONE", "SWEET", "TABLE", "TRAIN", "WATER",
+    "WHITE", "WORLD", "YOUTH",
+]
+
 @dataclass(frozen=True)
 class WordEntry:
     word: str
@@ -95,10 +103,28 @@ def _load_words_from_frontend(base_dir: Path) -> List[str]:
     candidates = re.findall(r"'([A-Z]{5})'", text)
     return [word.upper() for word in candidates if word.isalpha()]
 
+def _load_easy_words_from_frontend(base_dir: Path) -> List[str]:
+    word_list_path = (base_dir / ".." / "Front End" / "src" / "utils" / "wordList.ts").resolve()
+    if not word_list_path.exists():
+        return []
+    text = word_list_path.read_text(encoding="utf-8")
+    match = re.search(r"EASY_WORDS\\s*=\\s*\\[(.*?)\\];", text, re.S)
+    if not match:
+        return []
+    candidates = re.findall(r"'([A-Z]{5})'", match.group(1))
+    return [word.upper() for word in candidates if word.isalpha()]
+
+def load_easy_words(path: str) -> List[str]:
+    p = Path(path)
+    words = _load_easy_words_from_frontend(p.parent)
+    words.extend(DEFAULT_EASY_WORDS)
+    return sorted(set(words))
+
 def load_words(path: str) -> List[str]:
     p = Path(path)
     words = _load_words_from_file(p)
     words.extend(_load_words_from_frontend(p.parent))
+    words.extend(DEFAULT_EASY_WORDS)
     words = sorted(set(words))
     if not words:
         raise ValueError("words.txt is empty or invalid.")
@@ -170,10 +196,17 @@ class RunState:
         return max(0, remaining)
 
 class GameManager:
-    def __init__(self, words: List[str], word_provider: Optional[Callable[[int, str], str]] = None):
-        self.words = words
-        self.word_set = set(words)
-        self.word_entries = self._build_word_entries(words)
+    def __init__(
+        self,
+        words: List[str],
+        word_provider: Optional[Callable[[int, str], str]] = None,
+        easy_words: Optional[List[str]] = None,
+    ):
+        self.easy_words = sorted(set(easy_words or []))
+        merged_words = sorted(set(words).union(self.easy_words))
+        self.words = merged_words
+        self.word_set = set(self.words)
+        self.word_entries = self._build_word_entries(self.words)
         self.word_provider = word_provider
         self.runs: Dict[str, RunState] = {}
 
@@ -189,6 +222,8 @@ class GameManager:
     def _select_word_for_level(self, level: int) -> str:
         if not self.word_entries:
             raise ValueError("No words available.")
+        if difficulty_label(level) == "easy" and self.easy_words:
+            return random.choice(self.easy_words)
         if is_boss_level(level):
             top_count = max(1, int(round(len(self.word_entries) * 0.1)))
             candidates = [entry.word for entry in self.word_entries[-top_count:]]

@@ -1,203 +1,23 @@
-
+# backend/main.py
 import os
-from fastapi import FastAPI
-from google import genai
-
-app = FastAPI()
-
-gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-
-from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Tuple
-import random
-import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
-from starlette.staticfiles import StaticFiles
 
-BASE_DIR = Path(__file__).resolve().parent              # ...\bigD\Back End
-FRONTEND_DIR = (BASE_DIR / ".." / "Front end").resolve()  # ...\bigD\Front end
-
-app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
-
-
-LetterState = Literal["correct", "present", "absent"]
-
-DEFAULT_WORD_LEN = 5
-DEFAULT_MAX_GUESSES = 6
-DEFAULT_SKIP_COOLDOWN_LEVELS = 3
-
-def load_words(path: str) -> List[str]:
-    p = Path(path)
-    words = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        w = line.strip().upper()
-        if len(w) == DEFAULT_WORD_LEN and w.isalpha():
-            words.append(w)
-    if not words:
-        raise ValueError("words.txt is empty or invalid.")
-    return words
-
-def evaluate_guess(secret: str, guess: str) -> List[LetterState]:
-    """
-    Wordle-style evaluation that handles duplicate letters correctly.
-    """
-    secret = secret.upper()
-    guess = guess.upper()
-
-    result: List[LetterState] = ["absent"] * len(secret)
-    secret_counts: Dict[str, int] = {}
-
-   
-    for ch in secret:
-        secret_counts[ch] = secret_counts.get(ch, 0) + 1
-
-   
-    for i, ch in enumerate(guess):
-        if ch == secret[i]:
-            result[i] = "correct"
-            secret_counts[ch] -= 1
-
-    
-    for i, ch in enumerate(guess):
-        if result[i] == "correct":
-            continue
-        if secret_counts.get(ch, 0) > 0:
-            result[i] = "present"
-            secret_counts[ch] -= 1
-
-    return result
-
-@dataclass
-class RunState:
-    run_id: str
-    level: int = 1
-    secret: str = ""
-    guesses: List[str] = field(default_factory=list)
-    feedback: List[List[LetterState]] = field(default_factory=list)
-
-    
-    last_skip_level: int = -999
-    skip_cooldown_levels: int = DEFAULT_SKIP_COOLDOWN_LEVELS
-
-    
-    pending_powerups: List[dict] = field(default_factory=list)
-
-    @property
-    def won(self) -> bool:
-        return any(g == self.secret for g in self.guesses)
-
-    @property
-    def failed(self) -> bool:
-        return (not self.won) and (len(self.guesses) >= DEFAULT_MAX_GUESSES)
-
-    @property
-    def skip_available(self) -> bool:
-        return (self.level - self.last_skip_level) >= self.skip_cooldown_levels
-
-    def skip_in_levels(self) -> int:
-        remaining = self.skip_cooldown_levels - (self.level - self.last_skip_level)
-        return max(0, remaining)
-
-class GameManager:
-    def __init__(self, words: List[str]):
-        self.words = words
-        self.runs: Dict[str, RunState] = {}
-
-    def _new_secret(self) -> str:
-        return random.choice(self.words)
-
-    def start_run(self) -> RunState:
-        run_id = str(uuid.uuid4())
-        rs = RunState(run_id=run_id, secret=self._new_secret())
-        self.runs[run_id] = rs
-        return rs
-
-    def get_run(self, run_id: str) -> RunState:
-        if run_id not in self.runs:
-            raise KeyError("Run not found.")
-        return self.runs[run_id]
-
-    def submit_guess(self, run_id: str, guess: str) -> RunState:
-        rs = self.get_run(run_id)
-        guess = guess.strip().upper()
-
-        if rs.pending_powerups:
-            
-            return rs
-
-        if rs.won or rs.failed:
-            
-            return rs
-
-        if len(guess) != DEFAULT_WORD_LEN or not guess.isalpha():
-            return rs
-
-        rs.guesses.append(guess)
-        rs.feedback.append(evaluate_guess(rs.secret, guess))
-
-        
-        if rs.won:
-            rs.pending_powerups = self._roll_powerups()
-
-        
-        if rs.failed:
-            self._advance_level(rs, reward=False)
-
-        return rs
-
-    def skip_level(self, run_id: str) -> RunState:
-        rs = self.get_run(run_id)
-        if rs.pending_powerups:
-            return rs
-
-        if not rs.skip_available:
-            return rs
-
-        rs.last_skip_level = rs.level
-        self._advance_level(rs, reward=False)
-        return rs
-
-    def choose_powerup(self, run_id: str, powerup_id: str) -> Tuple[RunState, dict]:
-        rs = self.get_run(run_id)
-        if not rs.pending_powerups:
-            return rs, {}
-
-        chosen = next((p for p in rs.pending_powerups if p["id"] == powerup_id), None)
-        if not chosen:
-            return rs, {}
-
-        rs.pending_powerups = []
-        self._advance_level(rs, reward=True)
-        return rs, chosen
-
-    def _advance_level(self, rs: RunState, reward: bool):
-        rs.level += 1
-        rs.secret = self._new_secret()
-        rs.guesses = []
-        rs.feedback = []
-        rs.pending_powerups = []
-
-    def _roll_powerups(self) -> List[dict]:
-        pool = [
-            {"id": "time_plus_10", "type": "time", "value": 10, "name": "+10 seconds", "desc": "Adds 10 seconds to your run timer."},
-            {"id": "reveal_first", "type": "reveal", "value": "first", "name": "Reveal first letter", "desc": "Reveals the first letter of the next word."},
-            {"id": "gemini_hint", "type": "hint", "value": "definition", "name": "Gemini hint", "desc": "Get a hint generated by Gemini."},
-        ]
-        return random.sample(pool, 3)
-
-import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from google import genai
 
-from game import GameManager, load_words, DEFAULT_WORD_LEN, DEFAULT_MAX_GUESSES
+try:
+    from google import genai
+except Exception:
+    genai = None
+
+from game import GameManager, load_words, load_easy_words, DEFAULT_WORD_LEN, DEFAULT_MAX_GUESSES
 
 app = FastAPI()
 
-
+# Allow the browser frontend to call the backend during development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -205,21 +25,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-WORDS = load_words("words.txt")
-gm = GameManager(WORDS)
+BASE_DIR = Path(__file__).resolve().parent
+WORDS = load_words(str(BASE_DIR / "words.txt"))
+EASY_WORDS = load_easy_words(str(BASE_DIR / "words.txt"))
+
+# Gemini client reads GEMINI_API_KEY from environment variable
+gemini_client = None
+if genai:
+    try:
+        gemini_client = genai.Client()
+    except Exception:
+        gemini_client = None
+
+GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "4"))
+_gemini_pool = ThreadPoolExecutor(max_workers=2)
 
 
-gemini_client = genai.Client()
+def gemini_generate_text(prompt: str) -> str:
+    if not gemini_client:
+        return ""
+
+    def call_model() -> str:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        return (response.text or "").strip()
+
+    future = _gemini_pool.submit(call_model)
+    try:
+        return future.result(timeout=GEMINI_TIMEOUT_SECONDS)
+    except TimeoutError:
+        return ""
+    except Exception:
+        return ""
+
 
 class GuessIn(BaseModel):
     guess: str
 
+
 class PowerupChoiceIn(BaseModel):
     powerup_id: str
+
 
 class HintIn(BaseModel):
     word: str
     hint_type: str = "definition"  # could be: definition, category, context
+
+
+class RunHintIn(BaseModel):
+    hint_type: str = "definition"
+
 
 def run_state_to_dict(rs):
     return {
@@ -234,32 +91,42 @@ def run_state_to_dict(rs):
         "skip_in_levels": rs.skip_in_levels(),
         "word_len": DEFAULT_WORD_LEN,
         "max_guesses": DEFAULT_MAX_GUESSES,
+        "score": rs.score,
+        "last_score_delta": rs.last_score_delta,
+        "difficulty": rs.difficulty,
+        "boss_level": rs.boss_level,
     }
 
-@app.post("/api/run/start")
-def start_run():
-    rs = gm.start_run()
-    return run_state_to_dict(rs)
 
-@app.post("/api/run/{run_id}/guess")
-def submit_guess(run_id: str, payload: GuessIn):
-    rs = gm.submit_guess(run_id, payload.guess)
-    return run_state_to_dict(rs)
+def generate_word(level: int, difficulty: str) -> str:
+    if not gemini_client:
+        return ""
 
-@app.post("/api/run/{run_id}/skip")
-def skip_level(run_id: str):
-    rs = gm.skip_level(run_id)
-    return run_state_to_dict(rs)
+    prompt = (
+        "Generate one random 5-letter English word for a Wordle-style game.\n"
+        f"Difficulty: {difficulty}.\n"
+        "Easy should be common everyday words. Hard should be more obscure words.\n"
+        "Boss should be rare/uncommon words that are still valid English.\n"
+        "Rules:\n"
+        "- Return only the word.\n"
+        "- Exactly 5 letters.\n"
+        "- No punctuation or extra text."
+    )
 
-@app.post("/api/run/{run_id}/choose_powerup")
-def choose_powerup(run_id: str, payload: PowerupChoiceIn):
-    rs, chosen = gm.choose_powerup(run_id, payload.powerup_id)
-    return {"state": run_state_to_dict(rs), "chosen": chosen}
+    text = gemini_generate_text(prompt).upper()
+    if not text:
+        return ""
 
-@app.post("/api/hint")
-def get_hint(payload: HintIn):
-    word = payload.word.strip().upper()
-    hint_type = payload.hint_type
+    cleaned = "".join(ch if ch.isalpha() else " " for ch in text)
+    for token in cleaned.split():
+        if len(token) == DEFAULT_WORD_LEN and token.isalpha():
+            return token
+    return ""
+
+
+def generate_hint(word: str, hint_type: str) -> str:
+    if not gemini_client:
+        return "Think of a common English word used in everyday conversation."
 
     prompt = (
         "You are generating hints for a Wordle-style game.\n"
@@ -273,17 +140,122 @@ def get_hint(payload: HintIn):
         "Return only the hint."
     )
 
-    response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
-    hint = (response.text or "").strip()
+    hint = gemini_generate_text(prompt)
+    if not hint or word in hint.upper():
+        retry_prompt = (
+            prompt
+            + "\nImportant: The hint must NOT include the target word. Try again."
+        )
+        hint = gemini_generate_text(retry_prompt)
 
-    # Simple spoiler guard
+    if not hint:
+        hint = "Think of a common English word used in everyday conversation."
+
     if word in hint.upper():
-        hint = "It’s a common English word. Try thinking of everyday usage."
+        hint = "It's a common English word used in everyday conversation."
 
+    return hint
+
+
+def gemini_validates_word(word: str) -> bool:
+    if not gemini_client:
+        return False
+    prompt = (
+        "You are a strict English dictionary validator.\n"
+        f"Word: {word}\n"
+        "Reply with ONLY YES or NO. Is this a valid English word?"
+    )
+    text = gemini_generate_text(prompt).strip().upper()
+    if not text:
+        return False
+    return text.startswith("YES")
+
+
+gm = GameManager(WORDS, word_provider=generate_word, easy_words=EASY_WORDS)
+
+
+@app.post("/api/run/start")
+def start_run():
+    rs = gm.start_run()
+    return run_state_to_dict(rs)
+
+
+@app.post("/api/run/{run_id}/guess")
+def submit_guess(run_id: str, payload: GuessIn):
+    try:
+        rs = gm.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found.") from exc
+
+    if rs.pending_powerups or rs.won or rs.failed:
+        return run_state_to_dict(rs)
+
+    guess = payload.guess.strip().upper()
+    if len(guess) != DEFAULT_WORD_LEN:
+        raise HTTPException(status_code=400, detail=f"Guess must be {DEFAULT_WORD_LEN} letters.")
+    if not guess.isalpha():
+        raise HTTPException(status_code=400, detail="Letters only.")
+    if not gm.is_valid_guess(guess):
+        if gemini_client and gemini_validates_word(guess):
+            gm.add_word(guess)
+        else:
+            raise HTTPException(status_code=400, detail="Not in dictionary.")
+
+    rs = gm.submit_guess(run_id, guess)
+    return run_state_to_dict(rs)
+
+
+@app.post("/api/run/{run_id}/skip")
+def skip_level(run_id: str):
+    rs = gm.skip_level(run_id)
+    return run_state_to_dict(rs)
+
+
+@app.post("/api/run/{run_id}/choose_powerup")
+def choose_powerup(run_id: str, payload: PowerupChoiceIn):
+    rs, chosen = gm.choose_powerup(run_id, payload.powerup_id)
+    hint = None
+    reveal_letter = None
+    time_bonus_seconds = None
+    if chosen and chosen.get("type") == "hint":
+        hint_type = chosen.get("value") or "definition"
+        hint = generate_hint(rs.secret, hint_type)
+    if chosen and chosen.get("type") == "reveal":
+        reveal_letter = rs.secret[:1]
+    if chosen and chosen.get("type") == "time":
+        time_bonus_seconds = chosen.get("value")
+    return {
+        "state": run_state_to_dict(rs),
+        "chosen": chosen,
+        "hint": hint,
+        "reveal_letter": reveal_letter,
+        "time_bonus_seconds": time_bonus_seconds,
+    }
+
+
+@app.post("/api/hint")
+def get_hint(payload: HintIn):
+    word = payload.word.strip().upper()
+    hint_type = payload.hint_type
+    hint = generate_hint(word, hint_type)
     return {"hint": hint}
 
-# Serve frontend files
-app.mount("/", StaticFiles(directory="front end", html=True), name="front end")
+
+@app.post("/api/run/{run_id}/hint")
+def get_run_hint(run_id: str, payload: RunHintIn):
+    try:
+        rs = gm.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found.") from exc
+    hint = generate_hint(rs.secret, payload.hint_type)
+    return {"hint": hint}
+
+
+# Serve frontend files if built assets are present
+frontend_candidates = [
+    (BASE_DIR / ".." / "Front End" / "dist").resolve(),
+    (BASE_DIR / ".." / "Front End" / "build").resolve(),
+]
+frontend_dir = next((path for path in frontend_candidates if path.exists()), None)
+if frontend_dir:
+    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
