@@ -1,300 +1,137 @@
-const state = {
-  runId: null,
-  wordLen: 5,
-  maxGuesses: 6,
-  pendingPowerups: [],
-  remainingSeconds: 300,
-  timerId: null,
-  gameOver: false,
-  lastLevel: null,
-};
 
-const els = {
-  level: document.getElementById('level'),
-  timer: document.getElementById('timer'),
-  hint: document.getElementById('hint'),
-  guessCount: document.getElementById('guess-count'),
-  guessMax: document.getElementById('guess-max'),
-  message: document.getElementById('message'),
-  board: document.getElementById('board'),
-  powerups: document.getElementById('powerups'),
-  guessForm: document.getElementById('guess-form'),
-  guessInput: document.getElementById('guess-input'),
-  guessSubmit: document.querySelector('#guess-form button'),
-  startBtn: document.getElementById('start-btn'),
-  skipBtn: document.getElementById('skip-btn'),
-};
-
-if (!els.timer) {
-  const status = document.querySelector('.status');
-  if (status) {
-    const block = document.createElement('div');
-    const label = document.createElement('span');
-    const value = document.createElement('span');
-    label.className = 'label';
-    label.textContent = 'Timer';
-    value.id = 'timer';
-    value.textContent = '00:00';
-    block.appendChild(label);
-    block.appendChild(value);
-    status.appendChild(block);
-    els.timer = value;
-  }
-}
-
-function setMessage(text) {
-  if (els.message) {
-    els.message.textContent = text;
-  }
-}
-
-function setHint(text) {
-  if (els.hint) {
-    els.hint.textContent = text;
-  }
-}
-
-function formatTime(totalSeconds) {
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-}
+// Global run timer (client-side MVP)
+let timeRemaining = 300; // 5 minutes
+let timerOn = false;
+let timerInterval = null;
 
 function startTimer() {
-  if (state.timerId) {
-    return;
-  }
-  state.timerId = setInterval(() => {
-    if (state.gameOver) {
-      return;
-    }
-    state.remainingSeconds = Math.max(0, state.remainingSeconds - 1);
-    if (els.timer) {
-      els.timer.textContent = formatTime(state.remainingSeconds);
-    }
-    if (state.remainingSeconds <= 0) {
-      state.gameOver = true;
-      stopTimer();
-      renderGameOver();
+  if (timerInterval) clearInterval(timerInterval);
+  timerOn = true;
+  timerInterval = setInterval(() => {
+    if (!timerOn) return;
+    timeRemaining -= 1;
+    document.getElementById("time").textContent = timeRemaining;
+    if (timeRemaining <= 0) {
+      timerOn = false;
+      alert("Game Over: Time's up!");
     }
   }, 1000);
 }
 
-function stopTimer() {
-  if (state.timerId) {
-    clearInterval(state.timerId);
-    state.timerId = null;
-  }
-}
+function pauseTimer() { timerOn = false; }
+function resumeTimer() { if (timeRemaining > 0) timerOn = true; }
 
-function resetTimer() {
-  stopTimer();
-  state.remainingSeconds = 300;
-  if (els.timer) {
-    els.timer.textContent = formatTime(state.remainingSeconds);
-  }
-}
-
-async function api(path, options) {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
+async function api(path, body = null) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: body ? JSON.stringify(body) : null
   });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
-  }
-  return response.json();
+  return await res.json();
 }
 
-function updateState(next) {
-  state.runId = next.run_id;
-  state.wordLen = next.word_len;
-  state.maxGuesses = next.max_guesses;
-  state.pendingPowerups = next.pending_powerups || [];
-  if (state.lastLevel !== null && next.level !== state.lastLevel) {
-    setHint('');
-  }
-  state.lastLevel = next.level;
-  render(next);
-}
+function renderGrid() {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
 
-function renderGameOver() {
-  setMessage("Time's up. Game over. Press Start to restart.");
-  if (els.guessInput) {
-    els.guessInput.disabled = true;
-  }
-  if (els.guessSubmit) {
-    els.guessSubmit.disabled = true;
-  }
-  if (els.skipBtn) {
-    els.skipBtn.disabled = true;
-  }
-}
-
-function render(run) {
-  if (state.gameOver) {
-    renderGameOver();
-    return;
-  }
-  if (els.level) {
-    els.level.textContent = run.level;
-  }
-  if (els.guessCount) {
-    els.guessCount.textContent = run.guesses.length;
-  }
-  if (els.guessMax) {
-    els.guessMax.textContent = run.max_guesses;
-  }
-  if (els.guessInput) {
-    els.guessInput.maxLength = run.word_len;
-  }
-  if (els.startBtn) {
-    els.startBtn.textContent = run.run_id ? 'Restart Run' : 'Start';
-  }
-
-  const waitingOnPowerup = Boolean(run.pending_powerups && run.pending_powerups.length);
-  if (els.guessInput) {
-    els.guessInput.disabled = waitingOnPowerup;
-  }
-  if (els.guessSubmit) {
-    els.guessSubmit.disabled = waitingOnPowerup;
-  }
-  if (els.skipBtn) {
-    els.skipBtn.disabled = waitingOnPowerup || !run.skip_available;
-  }
-  if (waitingOnPowerup) {
-    stopTimer();
-  } else if (state.runId) {
-    startTimer();
-  }
-
-  if (run.won) {
-    setMessage('Nice! Pick a powerup to continue.');
-  } else if (run.failed) {
-    setMessage('Out of guesses. New level started.');
-  } else {
-    setMessage('Enter a word and submit.');
-  }
-
-  renderBoard(run);
-  renderPowerups(run);
-}
-
-function renderBoard(run) {
-  els.board.innerHTML = '';
-  run.guesses.forEach((guess, idx) => {
-    const row = document.createElement('div');
-    row.className = 'row';
-    const feedback = run.feedback[idx] || [];
-    for (let i = 0; i < run.word_len; i += 1) {
-      const tile = document.createElement('div');
-      tile.className = `tile ${feedback[i] || ''}`.trim();
-      tile.textContent = guess[i] || '';
+  // show past guesses
+  for (let r = 0; r < state.feedback.length; r++) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const guess = state.guesses[r];
+    const fb = state.feedback[r];
+    for (let c = 0; c < state.word_len; c++) {
+      const tile = document.createElement("div");
+      tile.className = "tile " + fb[c];
+      tile.textContent = guess[c];
       row.appendChild(tile);
     }
-    els.board.appendChild(row);
-  });
-}
-
-function renderPowerups(run) {
-  els.powerups.innerHTML = '';
-  if (!run.pending_powerups || run.pending_powerups.length === 0) {
-    return;
+    grid.appendChild(row);
   }
-  run.pending_powerups.forEach((power) => {
-    const card = document.createElement('div');
-    card.className = 'powerup-card';
-    card.innerHTML = `
-      <strong>${power.name}</strong>
-      <span>${power.desc}</span>
-    `;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = 'Choose';
-    button.addEventListener('click', () => choosePowerup(power.id));
-    card.appendChild(button);
-    els.powerups.appendChild(card);
-  });
+
+  // show empty rows
+  for (let r = state.feedback.length; r < state.max_guesses; r++) {
+    const row = document.createElement("div");
+    row.className = "row";
+    for (let c = 0; c < state.word_len; c++) {
+      const tile = document.createElement("div");
+      tile.className = "tile";
+      tile.textContent = "";
+      row.appendChild(tile);
+    }
+    grid.appendChild(row);
+  }
+
+  // skip UI
+  const skipBtn = document.getElementById("skipBtn");
+  const skipInfo = document.getElementById("skipInfo");
+  skipBtn.disabled = !state.skip_available;
+  skipInfo.textContent = state.skip_available ? "Skip available" : `Skip in ${state.skip_in_levels} level(s)`;
+
+  // powerups UI
+  const powerupsDiv = document.getElementById("powerups");
+  if (state.pending_powerups && state.pending_powerups.length > 0) {
+    powerupsDiv.classList.remove("hidden");
+    powerupsDiv.innerHTML = "<h3>Choose 1 power-up</h3>";
+    pauseTimer();
+
+    state.pending_powerups.forEach(p => {
+      const btn = document.createElement("button");
+      btn.textContent = `${p.name} — ${p.desc}`;
+      btn.onclick = () => choosePowerup(p.id);
+      powerupsDiv.appendChild(btn);
+      powerupsDiv.appendChild(document.createElement("br"));
+    });
+  } else {
+    powerupsDiv.classList.add("hidden");
+    powerupsDiv.innerHTML = "";
+    resumeTimer();
+  }
 }
 
 async function startRun() {
-  resetTimer();
-  setHint('');
-  state.gameOver = false;
-  const data = await api('/api/run/start', { method: 'POST' });
-  updateState(data);
+  state = await api("/api/run/start");
+  renderGrid();
+  document.getElementById("time").textContent = timeRemaining;
+  startTimer();
 }
 
-async function submitGuess(guess) {
-  if (!state.runId || state.gameOver) {
-    return;
-  }
-  const data = await api(`/api/run/${state.runId}/guess`, {
-    method: 'POST',
-    body: JSON.stringify({ guess }),
-  });
-  updateState(data);
+async function submitGuess() {
+  if (!state || timeRemaining <= 0) return;
+  const guess = document.getElementById("guessInput").value.trim();
+  document.getElementById("guessInput").value = "";
+
+  state = await api(`/api/run/${state.run_id}/guess`, {guess});
+  renderGrid();
 }
 
-async function skipLevel() {
-  if (!state.runId || state.gameOver) {
-    return;
-  }
-  const data = await api(`/api/run/${state.runId}/skip`, {
-    method: 'POST' },
-  );
-  updateState(data);
+async function doSkip() {
+  if (!state || timeRemaining <= 0) return;
+  state = await api(`/api/run/${state.run_id}/skip`);
+  renderGrid();
 }
 
 async function choosePowerup(powerupId) {
-  if (!state.runId || state.gameOver) {
-    return;
+  const out = await api(`/api/run/${state.run_id}/choose_powerup`, {powerup_id: powerupId});
+  const chosen = out.chosen;
+  state = out.state;
+
+  // Apply powerup effects on the client (MVP)
+  if (chosen.type === "time") {
+    timeRemaining += chosen.value;
+  } else if (chosen.type === "reveal") {
+    alert("Next word first letter revealed: (you can implement showing this on UI)");
+  } else if (chosen.type === "hint") {
+    // Ask server to generate hint with Gemini (uses next word on server, but we don't expose it)
+    // For MVP: ask for a hint about the *current* word only when needed.
+    // To keep it simple, you can add a "Hint" button later.
+    alert("Gemini hint power-up chosen. Add a Hint button next!");
   }
-  const data = await api(`/api/run/${state.runId}/choose_powerup`, {
-    method: 'POST',
-    body: JSON.stringify({ powerup_id: powerupId }),
-  });
-  updateState(data.state);
-  if (data.hint) {
-    setHint(`Hint: ${data.hint}`);
-  }
-  if (data.reveal_letter) {
-    setHint(`First letter: ${data.reveal_letter}`);
-  }
-  if (data.time_bonus_seconds) {
-    state.remainingSeconds += Number(data.time_bonus_seconds) || 0;
-    if (els.timer) {
-      els.timer.textContent = formatTime(state.remainingSeconds);
-    }
-  }
+
+  renderGrid();
 }
 
-els.guessForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const guess = els.guessInput.value.trim().toUpperCase();
-  if (guess.length !== state.wordLen) {
-    setMessage(`Guess must be ${state.wordLen} letters.`);
-    return;
-  }
-  els.guessInput.value = '';
-  submitGuess(guess).catch((err) => setMessage(err.message));
-});
+document.getElementById("guessBtn").onclick = submitGuess;
+document.getElementById("skipBtn").onclick = doSkip;
 
-els.startBtn.addEventListener('click', () => {
-  if (state.runId) {
-    const confirmed = window.confirm('Restart the run from level 1?');
-    if (!confirmed) {
-      return;
-    }
-  }
-  startRun().catch((err) => setMessage(err.message));
-});
-
-els.skipBtn.addEventListener('click', () => {
-  skipLevel().catch((err) => setMessage(err.message));
-});
-
-resetTimer();
-setHint('');
-setMessage('Press Start to begin.');
+startRun();
