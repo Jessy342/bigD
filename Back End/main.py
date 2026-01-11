@@ -1,11 +1,12 @@
 # backend/main.py
 import os
+import mimetypes
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 try:
@@ -24,6 +25,10 @@ from game import (
 )
 
 app = FastAPI()
+
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/json", ".map")
 
 # Allow the browser frontend to call the backend during development
 app.add_middleware(
@@ -344,9 +349,62 @@ def get_run_hint(run_id: str, payload: RunHintIn):
 
 # Serve frontend files if built assets are present
 frontend_candidates = [
+    (BASE_DIR / "static").resolve(),
+    (BASE_DIR / ".." / "static").resolve(),
     (BASE_DIR / ".." / "Front End" / "dist").resolve(),
     (BASE_DIR / ".." / "Front End" / "build").resolve(),
 ]
-frontend_dir = next((path for path in frontend_candidates if path.exists()), None)
-if frontend_dir:
-    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+
+
+def resolve_frontend_dir() -> Path | None:
+    for path in frontend_candidates:
+        if path.exists():
+            return path
+    return None
+
+
+@app.get("/", include_in_schema=False)
+def serve_frontend_index():
+    frontend_dir = resolve_frontend_dir()
+    if not frontend_dir:
+        raise HTTPException(status_code=404, detail="Frontend build not found. Run npm run build.")
+    index_path = (frontend_dir / "index.html").resolve()
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend index not found.")
+    return FileResponse(str(index_path))
+
+
+@app.get("/__debug/frontend", include_in_schema=False)
+def debug_frontend():
+    frontend_dir = resolve_frontend_dir()
+    assets = []
+    if frontend_dir:
+        assets_dir = frontend_dir / "assets"
+        if assets_dir.exists():
+            assets = sorted([p.name for p in assets_dir.iterdir() if p.is_file()])
+    return {
+        "frontend_dir": str(frontend_dir) if frontend_dir else None,
+        "candidates": [str(path) for path in frontend_candidates],
+        "index_exists": bool(frontend_dir and (frontend_dir / "index.html").exists()),
+        "assets": assets,
+    }
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def serve_frontend_fallback(full_path: str):
+    if full_path.startswith("api"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    frontend_dir = resolve_frontend_dir()
+    if not frontend_dir:
+        raise HTTPException(status_code=404, detail="Frontend build not found. Run npm run build.")
+    safe_path = Path(full_path)
+    if safe_path.is_absolute() or ".." in safe_path.parts:
+        raise HTTPException(status_code=404, detail="Not Found")
+    candidate = (frontend_dir / safe_path).resolve()
+    if candidate.is_file():
+        media_type, _ = mimetypes.guess_type(str(candidate))
+        return FileResponse(str(candidate), media_type=media_type)
+    index_path = (frontend_dir / "index.html").resolve()
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend index not found.")
+    return FileResponse(str(index_path))
