@@ -65,7 +65,7 @@ export const VALID_WORDS = new Set([
   'BEACH', 'BEAST', 'BLACK', 'BLADE', 'BLAME',
   'BLANK', 'BLAST', 'BLEED', 'BLESS', 'BLIND',
   'BLOCK', 'BLOOD', 'BLOOM', 'BLOWN', 'BOOTH',
-  'BOUND', 'BRAIN', 'BRAND', 'BRAVE', 'BREAD',
+  'BOUND', 'BRAIN', 'BRAND', 'BRAKE', 'BRAVE', 'BREAD',
   'BREAK', 'BREED', 'BRIEF', 'BRING', 'BROAD',
   'BROKE', 'BROWN', 'BUYER', 'CABLE', 'CARRY',
   'CATCH', 'CAUSE', 'CHAIN', 'CHAIR', 'CHART',

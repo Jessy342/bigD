@@ -48,6 +48,7 @@ if genai:
 GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "4"))
 _gemini_pool = ThreadPoolExecutor(max_workers=2)
 _hint_cache = {}
+_word_validation_cache = {}
 
 
 def gemini_generate_text(prompt: str) -> str:
@@ -80,11 +81,11 @@ class PowerupChoiceIn(BaseModel):
 
 class HintIn(BaseModel):
     word: str
-    hint_type: str = "definition"  # could be: definition, category, context
+    hint_type: str = "definition"  # could be: definition, usage, category, context
 
 
 class RunHintIn(BaseModel):
-    hint_type: str = "definition"
+    hint_type: str = "context"
 
 
 def run_state_to_dict(rs):
@@ -146,29 +147,64 @@ def _fallback_hint(word: str) -> str:
 
     return f"It is a {len(word)}-letter word with " + ", ".join(details) + "."
 
+def _fallback_usage(word: str) -> str:
+    cleaned = word.strip().lower()
+    return f'Example: "{cleaned}" appears in this sentence.'
+
 
 def generate_hint(word: str, hint_type: str) -> str:
-    cache_key = (word.strip().upper(), hint_type)
+    normalized = (hint_type or "context").strip().lower()
+    cache_key = (word.strip().upper(), normalized)
     cached = _hint_cache.get(cache_key)
     if cached:
         return cached
+
+    if normalized == "usage":
+        if not gemini_client:
+            hint = _fallback_usage(word)
+            _hint_cache[cache_key] = hint
+            return hint
+
+        prompt = (
+            "You are generating a usage example for a Wordle-style game.\n"
+            f"Target word: {word}\n"
+            "Rules:\n"
+            "- Write ONE short sentence that uses the target word.\n"
+            "- Keep it under 12 words.\n"
+            "- Return only the sentence."
+        )
+        hint = gemini_generate_text(prompt)
+        if not hint:
+            hint = _fallback_usage(word)
+        _hint_cache[cache_key] = hint
+        return hint
 
     if not gemini_client:
         hint = _fallback_hint(word)
         _hint_cache[cache_key] = hint
         return hint
 
-    prompt = (
-        "You are generating hints for a Wordle-style game.\n"
-        f"Target word: {word}\n"
-        f"Hint style: {hint_type}\n"
-        "Rules:\n"
-        "- Do NOT say the target word.\n"
-        "- Do NOT reveal letters or positions.\n"
-        "- Do NOT give an anagram.\n"
-        "- Keep it to ONE short sentence.\n"
-        "Return only the hint."
-    )
+    if normalized == "definition":
+        prompt = (
+            "You are a dictionary.\n"
+            f"Target word: {word}\n"
+            "Rules:\n"
+            "- Provide ONE sentence with a concise definition.\n"
+            "- Do NOT use the target word in the definition.\n"
+            "- Keep it under 12 words.\n"
+            "Return only the definition."
+        )
+    else:
+        prompt = (
+            "You are generating a subtle clue for a Wordle-style game.\n"
+            f"Target word: {word}\n"
+            "Rules:\n"
+            "- Do NOT say the target word.\n"
+            "- Do NOT reveal letters or positions.\n"
+            "- Do NOT give an anagram.\n"
+            "- Keep it to ONE short sentence.\n"
+            "Return only the hint."
+        )
 
     hint = gemini_generate_text(prompt)
     if not hint or word in hint.upper():
@@ -185,18 +221,37 @@ def generate_hint(word: str, hint_type: str) -> str:
     return hint
 
 
-def gemini_validates_word(word: str) -> bool:
+def gemini_validates_word(word: str):
     if not gemini_client:
-        return False
+        return None
+    cleaned = word.strip().upper()
+    cached = _word_validation_cache.get(cleaned)
+    if cached is not None:
+        return cached
     prompt = (
         "You are a strict English dictionary validator.\n"
-        f"Word: {word}\n"
+        f"Word: {cleaned}\n"
         "Reply with ONLY YES or NO. Is this a valid English word?"
     )
-    text = gemini_generate_text(prompt).strip().upper()
+    text = gemini_generate_text(prompt)
     if not text:
-        return False
-    return text.startswith("YES")
+        return None
+    normalized = text.strip().upper()
+    result = None
+    if normalized.startswith("YES"):
+        result = True
+    elif normalized.startswith("NO"):
+        result = False
+    else:
+        has_yes = "YES" in normalized
+        has_no = "NO" in normalized
+        if has_yes and not has_no:
+            result = True
+        elif has_no and not has_yes:
+            result = False
+    if result is not None:
+        _word_validation_cache[cleaned] = result
+    return result
 
 
 gm = GameManager(WORDS, word_provider=generate_word, easy_words=EASY_WORDS)
@@ -223,11 +278,17 @@ def submit_guess(run_id: str, payload: GuessIn):
         raise HTTPException(status_code=400, detail=f"Guess must be {DEFAULT_WORD_LEN} letters.")
     if not guess.isalpha():
         raise HTTPException(status_code=400, detail="Letters only.")
-    if not gm.is_valid_guess(guess):
-        if gemini_client and gemini_validates_word(guess):
-            gm.add_word(guess)
-        else:
+    if gemini_client:
+        gemini_result = gemini_validates_word(guess)
+        if gemini_result is False:
             raise HTTPException(status_code=400, detail="Not in dictionary.")
+        if gemini_result is True:
+            if not gm.is_valid_guess(guess):
+                gm.add_word(guess)
+        elif not gm.is_valid_guess(guess):
+            raise HTTPException(status_code=400, detail="Not in dictionary.")
+    elif not gm.is_valid_guess(guess):
+        raise HTTPException(status_code=400, detail="Not in dictionary.")
 
     rs = gm.submit_guess(run_id, guess)
     return run_state_to_dict(rs)
@@ -247,6 +308,8 @@ def choose_powerup(run_id: str, payload: PowerupChoiceIn):
     time_bonus_seconds = None
     if chosen and chosen.get("type") == "hint":
         hint_type = chosen.get("value") or "definition"
+        if hint_type == "definition_or_usage":
+            hint_type = "definition"
         hint = generate_hint(rs.secret, hint_type)
     if chosen and chosen.get("type") == "reveal":
         reveal_letter = rs.secret[:1]
@@ -275,7 +338,7 @@ def get_run_hint(run_id: str, payload: RunHintIn):
         rs = gm.get_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found.") from exc
-    hint = generate_hint(rs.secret, payload.hint_type)
+    hint = generate_hint(rs.secret, "context")
     return {"hint": hint}
 
 
