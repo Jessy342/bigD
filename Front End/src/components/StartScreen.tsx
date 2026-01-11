@@ -39,7 +39,7 @@ export function StartScreen({ onStart, stats }: StartScreenProps) {
             transition={{ delay: 0.2 }}
             className="text-white mb-3"
           >
-            HACKATHON WORDLE
+            ROUGLE
           </motion.h1>
           
           <motion.p

@@ -162,7 +162,7 @@ export function GameBoard() {
     setHintOpen(false);
     setHintText('');
     setHintLoading(false);
-  }, [run.level]);
+  }, [run?.level]);
 
   const startGame = useCallback(async () => {
     try {
@@ -388,7 +388,7 @@ export function GameBoard() {
               <Gamepad2 className="w-7 h-7 text-white" />
             </div>
             <div>
-              <h1 className="text-white">HACKATHON WORDLE</h1>
+              <h1 className="text-white">ROUGLE</h1>
               <p className="text-sm text-gray-400">Guess the 5-letter word</p>
             </div>
           </div>
@@ -425,8 +425,8 @@ export function GameBoard() {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-3 mb-6">
-          <div className="bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
+        <div className="flex flex-wrap justify-center gap-3 mb-6">
+          <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
             <div className="flex items-center justify-center gap-2 mb-1">
               <Trophy className="w-4 h-4 text-primary" />
               <span className="text-white">Lv {level}</span>
@@ -434,7 +434,7 @@ export function GameBoard() {
             <p className="text-xs text-gray-400">Level</p>
           </div>
 
-          <div className="bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
+          <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
             <div className="flex items-center justify-center gap-2 mb-1">
               <Timer className="w-4 h-4 text-green-500" />
               <span className="text-white">{formatTime(remainingSeconds)}</span>
@@ -442,15 +442,7 @@ export function GameBoard() {
             <p className="text-xs text-gray-400">Time</p>
           </div>
 
-          <div className="bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
-            <div className="flex items-center justify-center gap-2 mb-1">
-              <Hash className="w-4 h-4 text-blue-500" />
-              <span className="text-white">{totalGuesses}</span>
-            </div>
-            <p className="text-xs text-gray-400">Total</p>
-          </div>
-
-          <div className="bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
+          <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
             <div className="flex items-center justify-center gap-2 mb-1">
               <Hash className="w-4 h-4 text-orange-500" />
               <span className="text-white">{guesses.length}/{maxGuesses}</span>
@@ -458,7 +450,7 @@ export function GameBoard() {
             <p className="text-xs text-gray-400">Guesses</p>
           </div>
 
-          <div className="bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
+          <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
             <div className="flex items-center justify-center gap-2 mb-1">
               <Star className="w-4 h-4 text-green-500" />
               <span className="text-white">{score}</span>
@@ -466,7 +458,7 @@ export function GameBoard() {
             <p className="text-xs text-gray-400">Score</p>
           </div>
 
-          <div className="bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
+          <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
             <div className="flex items-center justify-center gap-2 mb-1">
               <Trophy className={`w-4 h-4 ${bossLevel ? 'text-red-500' : 'text-primary'}`} />
               <span className="text-white">{bossLevel ? 'Boss' : difficulty}</span>
