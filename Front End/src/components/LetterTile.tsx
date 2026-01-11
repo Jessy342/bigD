@@ -26,6 +26,7 @@ export function LetterTile({ letter, state, animate = false, delay = 0 }: Letter
   return (
     <div
       className={`
+        letter-tile
         w-14 h-14 sm:w-16 sm:h-16 
         border-2 rounded-lg
         flex items-center justify-center
