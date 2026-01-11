@@ -138,6 +138,32 @@ export function GameBoard() {
     toast.error("Time's up! Run over.");
   }, [remainingSeconds, gameStatus, stats]);
 
+  useEffect(() => {
+    if (!run || !run.failed || gameStatus === 'lost') {
+      return;
+    }
+    setGameStatus('lost');
+    setStats((prev) => {
+      const next = {
+        gamesPlayed: prev.gamesPlayed + 1,
+        gamesWon: prev.gamesWon,
+        currentStreak: 0,
+      };
+      localStorage.setItem('wordle-stats', JSON.stringify(next));
+      return next;
+    });
+    toast.error('No guesses left. Run over.');
+  }, [run, gameStatus]);
+
+  useEffect(() => {
+    if (!run) {
+      return;
+    }
+    setHintOpen(false);
+    setHintText('');
+    setHintLoading(false);
+  }, [run.level]);
+
   const startGame = useCallback(async () => {
     try {
       const data = await api<RunState>('/api/run/start', { method: 'POST' });
@@ -184,7 +210,7 @@ export function GameBoard() {
   );
 
   const skipLevel = useCallback(async () => {
-    if (!run || powerupPending) {
+    if (!run || powerupPending || gameStatus !== 'playing') {
       return;
     }
     const previousLevel = run.level;
@@ -199,7 +225,7 @@ export function GameBoard() {
     } catch (error) {
       handleRunError(error, 'Failed to skip level.');
     }
-  }, [run, powerupPending, handleRunError]);
+  }, [run, powerupPending, gameStatus, handleRunError]);
 
   const choosePowerup = useCallback(
     async (powerupId: string) => {
@@ -382,7 +408,7 @@ export function GameBoard() {
               onClick={skipLevel}
               className="px-4 py-2 bg-yellow-600/20 hover:bg-yellow-600/30 rounded-lg border border-yellow-600/50 transition-colors flex items-center gap-2"
               title="Skip Level"
-              disabled={!run || powerupPending || !run.skip_available}
+              disabled={!run || powerupPending || gameStatus !== 'playing' || !run.skip_available}
             >
               <SkipForward className="w-4 h-4 text-yellow-500" />
               <span className="text-sm text-yellow-500">Skip</span>

@@ -13,7 +13,15 @@ try:
 except Exception:
     genai = None
 
-from game import GameManager, load_words, load_easy_words, DEFAULT_WORD_LEN, DEFAULT_MAX_GUESSES
+from game import (
+    GameManager,
+    load_words,
+    load_easy_words,
+    DEFAULT_WORD_LEN,
+    DEFAULT_MAX_GUESSES,
+    RARE_LETTERS,
+    VOWELS,
+)
 
 app = FastAPI()
 
@@ -39,6 +47,7 @@ if genai:
 
 GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "4"))
 _gemini_pool = ThreadPoolExecutor(max_workers=2)
+_hint_cache = {}
 
 
 def gemini_generate_text(prompt: str) -> str:
@@ -124,9 +133,30 @@ def generate_word(level: int, difficulty: str) -> str:
     return ""
 
 
+def _fallback_hint(word: str) -> str:
+    word = word.strip().upper()
+    vowel_count = sum(1 for ch in word if ch in VOWELS)
+    has_repeat = len(set(word)) < len(word)
+    rare_count = sum(1 for ch in word if ch in RARE_LETTERS)
+
+    details = [f"{vowel_count} vowel{'s' if vowel_count != 1 else ''}"]
+    details.append("a repeated letter" if has_repeat else "no repeated letters")
+    if rare_count:
+        details.append("a rare letter")
+
+    return f"It is a {len(word)}-letter word with " + ", ".join(details) + "."
+
+
 def generate_hint(word: str, hint_type: str) -> str:
+    cache_key = (word.strip().upper(), hint_type)
+    cached = _hint_cache.get(cache_key)
+    if cached:
+        return cached
+
     if not gemini_client:
-        return "Think of a common English word used in everyday conversation."
+        hint = _fallback_hint(word)
+        _hint_cache[cache_key] = hint
+        return hint
 
     prompt = (
         "You are generating hints for a Wordle-style game.\n"
@@ -148,12 +178,10 @@ def generate_hint(word: str, hint_type: str) -> str:
         )
         hint = gemini_generate_text(retry_prompt)
 
-    if not hint:
-        hint = "Think of a common English word used in everyday conversation."
+    if not hint or word in hint.upper():
+        hint = _fallback_hint(word)
 
-    if word in hint.upper():
-        hint = "It's a common English word used in everyday conversation."
-
+    _hint_cache[cache_key] = hint
     return hint
 
 

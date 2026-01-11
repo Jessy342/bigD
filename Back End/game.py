@@ -11,7 +11,7 @@ LetterState = Literal["correct", "present", "absent"]
 
 DEFAULT_WORD_LEN = 5
 DEFAULT_MAX_GUESSES = 6
-DEFAULT_SKIP_COOLDOWN_LEVELS = 3
+DEFAULT_SKIP_COOLDOWN_LEVELS = 1
 
 COMMON_LETTERS = set("ETAOINSHRDL")
 MID_LETTERS = set("CUMWFGYPB")
@@ -291,15 +291,15 @@ class GameManager:
             rs.score += rs.last_score_delta
             rs.pending_powerups = self._roll_powerups()
 
-        # If failed, advance immediately (no powerup)
+        # If failed, end the run on this level.
         if rs.failed:
-            self._advance_level(rs, reward=False)
+            return rs
 
         return rs
 
     def skip_level(self, run_id: str) -> RunState:
         rs = self.get_run(run_id)
-        if rs.pending_powerups:
+        if rs.pending_powerups or rs.won or rs.failed:
             return rs
 
         if not rs.skip_available:
