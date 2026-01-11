@@ -1,0 +1,12 @@
+# Frontend
+Front End/node_modules
+Front End/dist
+Front End/.vite
+
+# Backend
+Back End/__pycache__
+Back End/.venv
+
+# General
+**/__pycache__
+**/*.pyc
