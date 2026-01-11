@@ -19,7 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY ["Back End/", "./"]
 
 # Copy built frontend (Vite = dist)
-COPY --from=frontend-build ["/frontend/dist", "/app/static"]
+COPY --from=frontend-build ["/frontend/build", "/app/static"]
+
 
 ENV PORT=10000
 EXPOSE 10000
