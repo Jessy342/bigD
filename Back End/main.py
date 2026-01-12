@@ -2,6 +2,7 @@
 import os
 import mimetypes
 import random
+import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
@@ -55,6 +56,7 @@ GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "4"))
 LENIENT_WORD_VALIDATION = os.getenv("LENIENT_WORD_VALIDATION", "true").lower() in ("1", "true", "yes")
 STREAK_BANK_TIME_PER_STREAK = int(os.getenv("STREAK_BANK_TIME_PER_STREAK", "5"))
 STREAK_BANK_SCORE_PER_STREAK = int(os.getenv("STREAK_BANK_SCORE_PER_STREAK", "50"))
+GEMINI_MIN_CONFIDENCE = float(os.getenv("GEMINI_MIN_CONFIDENCE", "0.85"))
 _gemini_pool = ThreadPoolExecutor(max_workers=2)
 _hint_cache = {}
 _word_validation_cache = {}
@@ -278,25 +280,18 @@ def generate_hint(word: str, hint_type: str) -> str:
     return hint
 
 
-def _parse_yes_no(text: str):
+def _extract_json_object(text: str):
     if not text:
         return None
-    normalized = text.strip().upper()
-    if normalized.startswith("YES"):
-        return True
-    if normalized.startswith("NO"):
-        return False
-    if "INVALID" in normalized or "NOT A WORD" in normalized or "NOT AN ENGLISH WORD" in normalized:
-        return False
-    if "VALID" in normalized:
-        return True
-    has_yes = "YES" in normalized
-    has_no = "NO" in normalized
-    if has_yes and not has_no:
-        return True
-    if has_no and not has_yes:
-        return False
-    return None
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    snippet = text[start : end + 1]
+    try:
+        return json.loads(snippet)
+    except Exception:
+        return None
 
 
 def gemini_validates_word(word: str):
@@ -309,19 +304,35 @@ def gemini_validates_word(word: str):
     prompt = (
         "You are a strict English dictionary validator.\n"
         f"Word: {cleaned}\n"
-        "Reply with ONLY YES or NO. Is this a valid English word?"
+        "Return ONLY JSON with keys: is_word, confidence, definition.\n"
+        "- is_word: true/false\n"
+        "- confidence: number 0 to 1 (only use >= 0.85 if certain)\n"
+        "- definition: short definition (do NOT include the word itself)\n"
+        "If you are unsure or the word is not in a standard dictionary, set is_word=false and confidence<=0.5.\n"
+        "Return ONLY the JSON object."
     )
     text = gemini_generate_text(prompt)
-    result = _parse_yes_no(text)
-    if result is None:
-        retry_prompt = (
-            f"Is '{cleaned}' a valid English word?\n"
-            "Reply with ONLY YES or NO."
-        )
-        result = _parse_yes_no(gemini_generate_text(retry_prompt))
-    if result is not None:
-        _word_validation_cache[cleaned] = result
-    return result
+    data = _extract_json_object(text)
+    if not isinstance(data, dict):
+        return None
+    is_word = bool(data.get("is_word"))
+    try:
+        confidence = float(data.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    definition = str(data.get("definition", "")).strip()
+    blocked_terms = ("abbreviation", "acronym", "initialism", "proper noun", "surname", "name", "brand")
+    if (
+        is_word
+        and confidence >= GEMINI_MIN_CONFIDENCE
+        and definition
+        and cleaned not in definition.upper()
+        and not any(term in definition.lower() for term in blocked_terms)
+    ):
+        _word_validation_cache[cleaned] = True
+        return True
+    _word_validation_cache[cleaned] = False
+    return False
 
 
 def _reveal_for_mode(secret: str, mode: str):
@@ -552,6 +563,15 @@ def get_run_hint(run_id: str, payload: RunHintIn):
         raise HTTPException(status_code=404, detail="Run not found.") from exc
     hint = generate_hint(rs.secret, payload.hint_type or "context")
     return {"hint": hint}
+
+
+@app.get("/api/validation", include_in_schema=False)
+def validation_status():
+    return {
+        "gemini_available": bool(gemini_client),
+        "min_confidence": GEMINI_MIN_CONFIDENCE,
+        "lenient": LENIENT_WORD_VALIDATION,
+    }
 
 
 # Serve frontend files if built assets are present
