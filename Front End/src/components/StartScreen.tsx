@@ -1,8 +1,17 @@
 import { motion } from 'motion/react';
 import { Play, Trophy, TrendingUp, Zap, Sparkles } from 'lucide-react';
 
+type Theme = {
+  id: string;
+  name: string;
+  description: string;
+};
+
 interface StartScreenProps {
   onStart: () => void;
+  themes: Theme[];
+  selectedThemeId: string | null;
+  onSelectTheme: (themeId: string) => void;
   stats: {
     gamesPlayed: number;
     gamesWon: number;
@@ -10,10 +19,12 @@ interface StartScreenProps {
   };
 }
 
-export function StartScreen({ onStart, stats }: StartScreenProps) {
+export function StartScreen({ onStart, stats, themes, selectedThemeId, onSelectTheme }: StartScreenProps) {
   const winRate = stats.gamesPlayed > 0 
     ? Math.round((stats.gamesWon / stats.gamesPlayed) * 100) 
     : 0;
+  const requiresTheme = themes.length > 0;
+  const canStart = !requiresTheme || Boolean(selectedThemeId);
 
   return (
     <div className="w-full max-w-2xl mx-auto px-4">
@@ -95,6 +106,32 @@ export function StartScreen({ onStart, stats }: StartScreenProps) {
           </div>
         </motion.div>
 
+        {themes.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.45 }}
+            className="w-full"
+          >
+            <h3 className="text-white mb-3 text-center">Choose a Theme</h3>
+            <div className="theme-grid">
+              {themes.map((theme) => {
+                const isActive = theme.id === selectedThemeId;
+                return (
+                  <button
+                    key={theme.id}
+                    onClick={() => onSelectTheme(theme.id)}
+                    className={`theme-card ${isActive ? 'theme-card-active' : ''}`}
+                  >
+                    <div className="text-white mb-1">{theme.name}</div>
+                    <div className="text-xs text-gray-400">{theme.description}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+
         {/* Stats Preview */}
         {stats.gamesPlayed > 0 && (
           <motion.div
@@ -135,10 +172,11 @@ export function StartScreen({ onStart, stats }: StartScreenProps) {
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.6, type: 'spring', stiffness: 200 }}
           onClick={onStart}
-          className="w-full max-w-xs bg-gradient-to-r from-primary to-indigo-600 hover:from-primary/90 hover:to-indigo-600/90 text-white py-4 px-8 rounded-xl transition-all active:scale-95 shadow-2xl shadow-primary/30 flex items-center justify-center gap-3 group"
+          disabled={!canStart}
+          className="w-full max-w-xs bg-gradient-to-r from-primary to-indigo-600 hover:from-primary/90 hover:to-indigo-600/90 text-white py-4 px-8 rounded-xl transition-all active:scale-95 shadow-2xl shadow-primary/30 flex items-center justify-center gap-3 group disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Play className="w-6 h-6 group-hover:scale-110 transition-transform" />
-          <span>Start Game</span>
+          <span>{canStart ? 'Start Game' : 'Select a Theme'}</span>
         </motion.button>
 
         {/* AI Feature Badge */}

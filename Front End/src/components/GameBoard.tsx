@@ -3,7 +3,7 @@ import { GameGrid } from './GameGrid';
 import { Keyboard } from './Keyboard';
 import { GameModal } from './GameModal';
 import { StartScreen } from './StartScreen';
-import { Trophy, Gamepad2, RotateCcw, SkipForward, Timer, Hash, Lightbulb, Star } from 'lucide-react';
+import { Trophy, Gamepad2, RotateCcw, SkipForward, Timer, Hash, Lightbulb, Star, Palette } from 'lucide-react';
 import { getKeyboardLetterStates, type LetterState } from '../utils/gameLogic';
 import { toast } from 'sonner';
 
@@ -11,6 +11,14 @@ const DEFAULT_WORD_LENGTH = 5;
 const DEFAULT_MAX_GUESSES = 6;
 const RUN_TIME_SECONDS = 5 * 60;
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+const THEME_PALETTE: Record<string, { primary: string; border: string; hue: number }> = {
+  nature: { primary: '#22c55e', border: 'rgba(34, 197, 94, 0.35)', hue: 130 },
+  food: { primary: '#f97316', border: 'rgba(249, 115, 22, 0.35)', hue: 24 },
+  sports: { primary: '#38bdf8', border: 'rgba(56, 189, 248, 0.35)', hue: 200 },
+  tech: { primary: '#22d3ee', border: 'rgba(34, 211, 238, 0.35)', hue: 190 },
+  music: { primary: '#f472b6', border: 'rgba(244, 114, 182, 0.35)', hue: 320 },
+  default: { primary: '#6366f1', border: 'rgba(99, 102, 241, 0.35)', hue: 230 },
+};
 
 type Powerup = {
   id: string;
@@ -19,6 +27,12 @@ type Powerup = {
   value: string | number;
   name: string;
   desc: string;
+};
+
+type Theme = {
+  id: string;
+  name: string;
+  description: string;
 };
 
 type RunState = {
@@ -37,6 +51,11 @@ type RunState = {
   last_score_delta: number;
   difficulty: string;
   boss_level: boolean;
+  theme_id: string;
+  theme_name: string;
+  theme_description: string;
+  pending_theme_choice: boolean;
+  theme_options: Theme[];
   inventory: Powerup[];
   clutch_shield: number;
 };
@@ -86,6 +105,8 @@ export function GameBoard() {
     gamesWon: 0,
     currentStreak: 0,
   });
+  const [themes, setThemes] = useState<Theme[]>([]);
+  const [selectedThemeId, setSelectedThemeId] = useState<string | null>(null);
 
   const wordLength = run?.word_len ?? DEFAULT_WORD_LENGTH;
   const maxGuesses = run?.max_guesses ?? DEFAULT_MAX_GUESSES;
@@ -99,18 +120,39 @@ export function GameBoard() {
   const score = run?.score ?? 0;
   const difficulty = run?.difficulty ?? 'easy';
   const bossLevel = run?.boss_level ?? false;
+  const themePending = run?.pending_theme_choice ?? false;
+  const themeOptions = run?.theme_options ?? [];
+  const themeId = run?.theme_id ?? selectedThemeId ?? '';
+  const themeName =
+    run?.theme_name ||
+    themes.find((theme) => theme.id === themeId)?.name ||
+    '';
+  const themeDescription =
+    run?.theme_description ||
+    themes.find((theme) => theme.id === themeId)?.description ||
+    '';
+  const themeChoicesSource = themeOptions.length ? themeOptions : themes;
+  const themeChoices = themeChoicesSource.slice(0, 2);
   const clutchShield = run?.clutch_shield ?? 0;
+  const runPaused = powerupPending || themePending;
   const timeRatio = Math.max(0, Math.min(1, remainingSeconds / RUN_TIME_SECONDS));
   const urgency = Math.max(0, Math.min(1, (0.35 - timeRatio) / 0.35));
   const timerHue = Math.round(210 - 210 * urgency);
+  const themeTokens = useMemo(
+    () => THEME_PALETTE[themeId] ?? THEME_PALETTE.default,
+    [themeId],
+  );
   const timerStyle = useMemo(
     () =>
       ({
         ['--timer-progress' as const]: timeRatio,
         ['--timer-hue' as const]: timerHue,
         ['--timer-urgency' as const]: urgency,
+        ['--theme-hue' as const]: themeTokens.hue,
+        ['--primary' as const]: themeTokens.primary,
+        ['--border' as const]: themeTokens.border,
       }) as CSSProperties,
-    [timeRatio, timerHue, urgency],
+    [timeRatio, timerHue, urgency, themeTokens],
   );
 
   const letterStates = useMemo(
@@ -126,6 +168,37 @@ export function GameBoard() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const loadThemes = async () => {
+      try {
+        const data = await api<{ themes: Theme[] }>('/api/themes');
+        if (cancelled) {
+          return;
+        }
+        const list = data.themes ?? [];
+        setThemes(list);
+        if (!selectedThemeId && list.length) {
+          setSelectedThemeId(list[0].id);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          toast.error('Failed to load themes.');
+        }
+      }
+    };
+    loadThemes();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (run?.theme_id) {
+      setSelectedThemeId(run.theme_id);
+    }
+  }, [run?.theme_id]);
+
+  useEffect(() => {
     const handleVisibility = () => {
       setIsTabActive(!document.hidden);
     };
@@ -135,7 +208,7 @@ export function GameBoard() {
   }, []);
 
   useEffect(() => {
-    if (!gameStarted || gameStatus !== 'playing' || powerupPending || remainingSeconds <= 0 || !isTabActive) {
+    if (!gameStarted || gameStatus !== 'playing' || runPaused || remainingSeconds <= 0 || !isTabActive) {
       return;
     }
     const interval = setInterval(() => {
@@ -153,7 +226,7 @@ export function GameBoard() {
   }, [
     gameStarted,
     gameStatus,
-    powerupPending,
+    runPaused,
     remainingSeconds,
     isTabActive,
     timerFreezeSeconds,
@@ -190,7 +263,11 @@ export function GameBoard() {
 
   const startGame = useCallback(async () => {
     try {
-      const data = await api<RunState>('/api/run/start', { method: 'POST' });
+      const payload = selectedThemeId ? { theme_id: selectedThemeId } : undefined;
+      const data = await api<RunState>('/api/run/start', {
+        method: 'POST',
+        body: payload ? JSON.stringify(payload) : undefined,
+      });
       setRun(data);
       setGameStarted(true);
       setGameStatus('playing');
@@ -206,7 +283,7 @@ export function GameBoard() {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to start run.');
     }
-  }, []);
+  }, [selectedThemeId]);
 
   const restartRun = useCallback(() => {
     setGameStarted(false);
@@ -291,7 +368,7 @@ export function GameBoard() {
   }, [remainingSeconds, gameStatus, stats, clutchShield, consumeClutchShield]);
 
   const skipLevel = useCallback(async () => {
-    if (!run || powerupPending || gameStatus !== 'playing') {
+    if (!run || runPaused || gameStatus !== 'playing') {
       return;
     }
     const previousLevel = run.level;
@@ -306,7 +383,7 @@ export function GameBoard() {
     } catch (error) {
       handleRunError(error, 'Failed to skip level.');
     }
-  }, [run, powerupPending, gameStatus, handleRunError]);
+  }, [run, runPaused, gameStatus, handleRunError]);
 
   const choosePowerup = useCallback(
     async (powerupId: string) => {
@@ -334,9 +411,30 @@ export function GameBoard() {
     [run, handleRunError],
   );
 
+  const chooseTheme = useCallback(
+    async (themeId: string) => {
+      if (!run) {
+        return;
+      }
+      try {
+        const data = await api<RunState>(`/api/run/${run.run_id}/choose_theme`, {
+          method: 'POST',
+          body: JSON.stringify({ theme_id: themeId }),
+        });
+        setRun(data);
+        if (data.theme_name) {
+          toast.success(`Theme selected: ${data.theme_name}`, { duration: 4000 });
+        }
+      } catch (error) {
+        handleRunError(error, 'Failed to choose theme.');
+      }
+    },
+    [run, handleRunError],
+  );
+
   const useInventoryPowerup = useCallback(
     async (inventoryId: string, options?: { choice?: string; streak?: number }) => {
-      if (!run || powerupPending || gameStatus !== 'playing') {
+      if (!run || runPaused || gameStatus !== 'playing') {
         return;
       }
       try {
@@ -396,11 +494,11 @@ export function GameBoard() {
         handleRunError(error, 'Failed to use powerup.');
       }
     },
-    [run, powerupPending, gameStatus, handleRunError, pushMessages, stats],
+    [run, runPaused, gameStatus, handleRunError, pushMessages, stats],
   );
 
   const requestHint = useCallback(async () => {
-    if (!run || powerupPending || gameStatus !== 'playing') {
+    if (!run || runPaused || gameStatus !== 'playing') {
       return;
     }
     setHintLoading(true);
@@ -417,10 +515,10 @@ export function GameBoard() {
     } finally {
       setHintLoading(false);
     }
-  }, [run, powerupPending, gameStatus, handleRunError]);
+  }, [run, runPaused, gameStatus, handleRunError]);
 
   const handleGuessSubmit = useCallback(async () => {
-    if (!run || powerupPending || gameStatus !== 'playing') {
+    if (!run || runPaused || gameStatus !== 'playing') {
       return;
     }
 
@@ -478,11 +576,11 @@ export function GameBoard() {
       setCurrentGuess('');
       handleRunError(error, 'Guess failed.');
     }
-  }, [run, powerupPending, gameStatus, currentGuess, wordLength, stats, handleRunError, pushMessages]);
+  }, [run, runPaused, gameStatus, currentGuess, wordLength, stats, handleRunError, pushMessages]);
 
   const handleKeyPress = useCallback(
     (key: string) => {
-      if (gameStatus !== 'playing' || powerupPending) {
+      if (gameStatus !== 'playing' || runPaused) {
         return;
       }
 
@@ -500,12 +598,12 @@ export function GameBoard() {
         setCurrentGuess((prev) => prev + key);
       }
     },
-    [gameStatus, powerupPending, handleGuessSubmit, currentGuess.length, wordLength],
+    [gameStatus, runPaused, handleGuessSubmit, currentGuess.length, wordLength],
   );
 
   useEffect(() => {
     const handlePhysicalKeyPress = (e: KeyboardEvent) => {
-      if (!gameStarted || gameStatus !== 'playing' || powerupPending) {
+      if (!gameStarted || gameStatus !== 'playing' || runPaused) {
         return;
       }
 
@@ -520,7 +618,7 @@ export function GameBoard() {
 
     window.addEventListener('keydown', handlePhysicalKeyPress);
     return () => window.removeEventListener('keydown', handlePhysicalKeyPress);
-  }, [handleKeyPress, gameStarted, gameStatus, powerupPending]);
+  }, [handleKeyPress, gameStarted, gameStatus, runPaused]);
 
   const handleStreakBankChoice = useCallback(
     (choice: 'time' | 'score') => {
@@ -549,7 +647,15 @@ export function GameBoard() {
   };
 
   if (!gameStarted) {
-    return <StartScreen onStart={startGame} stats={stats} />;
+    return (
+      <StartScreen
+        onStart={startGame}
+        stats={stats}
+        themes={themes}
+        selectedThemeId={selectedThemeId}
+        onSelectTheme={setSelectedThemeId}
+      />
+    );
   }
 
   return (
@@ -572,7 +678,7 @@ export function GameBoard() {
                 onClick={requestHint}
                 className="px-4 py-2 bg-purple-600/20 hover:bg-purple-600/30 rounded-lg border border-purple-600/50 transition-colors flex items-center gap-2"
                 title="Get a hint"
-                disabled={!run || powerupPending || gameStatus !== 'playing' || hintLoading}
+                disabled={!run || runPaused || gameStatus !== 'playing' || hintLoading}
               >
                 <Lightbulb className="w-4 h-4 text-purple-500" />
                 <span className="text-sm text-purple-500">{hintLoading ? 'Thinking...' : 'Hint'}</span>
@@ -582,7 +688,7 @@ export function GameBoard() {
                 onClick={skipLevel}
                 className="px-4 py-2 bg-yellow-600/20 hover:bg-yellow-600/30 rounded-lg border border-yellow-600/50 transition-colors flex items-center gap-2"
                 title="Skip Level"
-                disabled={!run || powerupPending || gameStatus !== 'playing' || !run.skip_available}
+                disabled={!run || runPaused || gameStatus !== 'playing' || !run.skip_available}
               >
                 <SkipForward className="w-4 h-4 text-yellow-500" />
                 <span className="text-sm text-yellow-500">Skip</span>
@@ -631,6 +737,14 @@ export function GameBoard() {
               </div>
               <p className="text-xs text-gray-400">Difficulty</p>
             </div>
+
+            <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
+              <div className="flex items-center justify-center gap-2 mb-1">
+                <Palette className="w-4 h-4 text-purple-400" />
+                <span className="text-white">{themeName || 'Theme'}</span>
+              </div>
+              <p className="text-xs text-gray-400">{themeDescription || 'Theme'}</p>
+            </div>
           </div>
 
           <div className="inventory-panel">
@@ -660,7 +774,7 @@ export function GameBoard() {
                           }
                           useInventoryPowerup(inventoryId);
                         }}
-                        disabled={!run || powerupPending || gameStatus !== 'playing'}
+                        disabled={!run || runPaused || gameStatus !== 'playing'}
                       >
                         {isStreakBank ? 'Bank' : 'Use'}
                       </button>
@@ -688,7 +802,7 @@ export function GameBoard() {
           <Keyboard
             onKeyPress={handleKeyPress}
             letterStates={letterStates}
-            disabled={gameStatus !== 'playing' || powerupPending}
+            disabled={gameStatus !== 'playing' || runPaused}
           />
         </div>
       </div>
@@ -721,6 +835,30 @@ export function GameBoard() {
                 >
                   <div className="text-white mb-1">{powerup.name}</div>
                   <div className="text-xs text-gray-400">{powerup.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {themePending && !powerupPending && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-gradient-to-br from-[#1a1f3a] to-[#0a0e27] border-2 border-primary/50 rounded-2xl p-8 max-w-md w-full shadow-2xl shadow-primary/20">
+            <div className="text-center mb-6">
+              <h2 className="text-white mb-2">Choose a Theme</h2>
+              <p className="text-gray-400 text-sm">Boss cleared. Pick your next theme.</p>
+            </div>
+            <div className="theme-grid theme-grid-choice">
+              {themeChoices.map((theme, index) => (
+                <button
+                  key={theme.id}
+                  onClick={() => chooseTheme(theme.id)}
+                  className="theme-card theme-card-animate"
+                  style={{ animationDelay: `${index * 120}ms` }}
+                >
+                  <div className="text-white mb-1">{theme.name}</div>
+                  <div className="text-xs text-gray-400">{theme.description}</div>
                 </button>
               ))}
             </div>

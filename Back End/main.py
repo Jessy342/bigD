@@ -3,6 +3,7 @@ import os
 import mimetypes
 import random
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
@@ -21,10 +22,78 @@ from game import (
     load_words,
     load_easy_words,
     DEFAULT_WORD_LEN,
-    DEFAULT_MAX_GUESSES,
     RARE_LETTERS,
     VOWELS,
 )
+
+DEFAULT_THEMES = [
+    {
+        "id": "nature",
+        "name": "Nature",
+        "description": "Plants, animals, landscapes",
+        "prompt_seed": "nature, outdoors, plants, animals",
+    },
+    {
+        "id": "food",
+        "name": "Food",
+        "description": "Ingredients and dishes",
+        "prompt_seed": "foods, cooking, ingredients",
+    },
+    {
+        "id": "sports",
+        "name": "Sports",
+        "description": "Games, gear, actions",
+        "prompt_seed": "sports, athletics, equipment",
+    },
+    {
+        "id": "tech",
+        "name": "Tech",
+        "description": "Computers, internet, devices",
+        "prompt_seed": "technology, computing, internet",
+    },
+    {
+        "id": "music",
+        "name": "Music",
+        "description": "Instruments and sound",
+        "prompt_seed": "music, instruments, audio",
+    },
+]
+
+
+def load_themes(path: Path) -> list[dict]:
+    themes: list[dict] = []
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = []
+        if isinstance(data, list):
+            themes = data
+    if not themes:
+        themes = DEFAULT_THEMES
+    seen: set[str] = set()
+    cleaned: list[dict] = []
+    for item in themes:
+        if not isinstance(item, dict):
+            continue
+        theme_id = str(item.get("id", "")).strip().lower()
+        name = str(item.get("name", "")).strip()
+        description = str(item.get("description", "")).strip()
+        prompt_seed = str(item.get("prompt_seed", "")).strip()
+        if not theme_id or theme_id in seen:
+            continue
+        if not name or not description:
+            continue
+        cleaned.append(
+            {
+                "id": theme_id,
+                "name": name,
+                "description": description,
+                "prompt_seed": prompt_seed or name,
+            }
+        )
+        seen.add(theme_id)
+    return cleaned
 
 app = FastAPI()
 
@@ -43,6 +112,9 @@ app.add_middleware(
 BASE_DIR = Path(__file__).resolve().parent
 WORDS = load_words(str(BASE_DIR / "words.txt"))
 EASY_WORDS = load_easy_words(str(BASE_DIR / "words.txt"))
+THEMES = load_themes(BASE_DIR / "themes.json")
+THEMES_BY_ID = {theme["id"]: theme for theme in THEMES}
+DEFAULT_THEME_ID = THEMES[0]["id"] if THEMES else ""
 
 # Gemini client reads GEMINI_API_KEY from environment variable
 gemini_client = None
@@ -57,9 +129,15 @@ LENIENT_WORD_VALIDATION = os.getenv("LENIENT_WORD_VALIDATION", "true").lower() i
 STREAK_BANK_TIME_PER_STREAK = int(os.getenv("STREAK_BANK_TIME_PER_STREAK", "5"))
 STREAK_BANK_SCORE_PER_STREAK = int(os.getenv("STREAK_BANK_SCORE_PER_STREAK", "50"))
 GEMINI_MIN_CONFIDENCE = float(os.getenv("GEMINI_MIN_CONFIDENCE", "0.85"))
+THEME_BANK_MIN = int(os.getenv("THEME_BANK_MIN", "12"))
+THEME_BANK_REFILL = int(os.getenv("THEME_BANK_REFILL", "36"))
+THEME_CANDIDATE_COUNT = int(os.getenv("THEME_CANDIDATE_COUNT", "40"))
+THEME_RECENT_LIMIT = int(os.getenv("THEME_RECENT_LIMIT", "50"))
 _gemini_pool = ThreadPoolExecutor(max_workers=2)
 _hint_cache = {}
 _word_validation_cache = {}
+_theme_word_banks: dict[str, list[str]] = {}
+_theme_recent: dict[str, list[str]] = {}
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
@@ -81,6 +159,108 @@ def gemini_generate_text(prompt: str) -> str:
         return ""
     except Exception:
         return ""
+
+
+def _theme_public(theme: dict) -> dict:
+    return {
+        "id": theme.get("id", ""),
+        "name": theme.get("name", ""),
+        "description": theme.get("description", ""),
+    }
+
+
+def _theme_options(current_theme_id: str, count: int = 2) -> list[dict]:
+    options = [_theme_public(theme) for theme in THEMES if theme.get("id") != current_theme_id]
+    if len(options) <= count:
+        return options
+    return random.sample(options, count)
+
+
+def _record_theme_recent(theme_id: str, word: str) -> None:
+    recent = _theme_recent.setdefault(theme_id, [])
+    recent.append(word)
+    if len(recent) > THEME_RECENT_LIMIT:
+        del recent[:-THEME_RECENT_LIMIT]
+
+
+def _is_valid_word(word: str) -> bool:
+    if "gm" in globals():
+        try:
+            return gm.is_valid_guess(word)
+        except Exception:
+            return False
+    return word in WORDS
+
+
+def _generate_theme_candidates(theme: dict, difficulty: str, boss: bool) -> list[str]:
+    if not gemini_client:
+        return []
+    difficulty_label = "boss" if boss else (difficulty or "easy")
+    difficulty_hint = {
+        "easy": "common everyday",
+        "medium": "common",
+        "hard": "less common",
+        "expert": "obscure",
+        "master": "rare",
+        "legend": "very rare",
+        "boss": "rare",
+    }.get(difficulty_label, "common")
+    prompt = (
+        f"Generate {THEME_CANDIDATE_COUNT} English words that are exactly 5 letters long.\n"
+        f"Theme: {theme.get('name')} ({theme.get('description')})\n"
+        f"Focus: {theme.get('prompt_seed')}\n"
+        f"Difficulty: {difficulty_label} ({difficulty_hint})\n"
+        "Rules:\n"
+        "- Output ONLY the words, one per line.\n"
+        "- No proper nouns or acronyms.\n"
+        "- Avoid plurals ending in S if possible.\n"
+        "- No punctuation, numbering, or extra text."
+    )
+    text = gemini_generate_text(prompt)
+    if not text:
+        return []
+    tokens = re.findall(r"[A-Za-z]{5}", text)
+    results: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        word = token.upper()
+        if word in seen:
+            continue
+        seen.add(word)
+        if _is_valid_word(word):
+            results.append(word)
+    return results
+
+
+def _refill_theme_bank(theme_id: str, difficulty: str, boss: bool) -> None:
+    theme = THEMES_BY_ID.get(theme_id)
+    if not theme:
+        return
+    candidates = _generate_theme_candidates(theme, difficulty, boss)
+    if not candidates:
+        return
+    recent = set(_theme_recent.get(theme_id, []))
+    bank = _theme_word_banks.setdefault(theme_id, [])
+    for word in candidates:
+        if len(bank) >= THEME_BANK_REFILL:
+            break
+        if word in recent or word in bank:
+            continue
+        bank.append(word)
+
+
+def get_theme_word(theme_id: str, level: int, difficulty: str, boss: bool) -> str:
+    if not theme_id or theme_id not in THEMES_BY_ID:
+        return ""
+    bank = _theme_word_banks.setdefault(theme_id, [])
+    if len(bank) < THEME_BANK_MIN:
+        _refill_theme_bank(theme_id, difficulty, boss)
+    if bank:
+        choice = random.choice(bank)
+        bank.remove(choice)
+        _record_theme_recent(theme_id, choice)
+        return choice
+    return ""
 
 
 class GuessIn(BaseModel):
@@ -105,7 +285,16 @@ class UsePowerupIn(BaseModel):
     streak: int | None = None
 
 
+class StartRunIn(BaseModel):
+    theme_id: str | None = None
+
+
+class ThemeChoiceIn(BaseModel):
+    theme_id: str
+
+
 def run_state_to_dict(rs):
+    theme = THEMES_BY_ID.get(rs.theme_id) if rs.theme_id else None
     return {
         "run_id": rs.run_id,
         "level": rs.level,
@@ -122,12 +311,22 @@ def run_state_to_dict(rs):
         "last_score_delta": rs.last_score_delta,
         "difficulty": rs.difficulty,
         "boss_level": rs.boss_level,
+        "theme_id": rs.theme_id,
+        "theme_name": theme.get("name") if theme else "",
+        "theme_description": theme.get("description") if theme else "",
+        "pending_theme_choice": rs.pending_theme_choice,
+        "theme_options": rs.theme_options,
         "inventory": rs.inventory,
         "clutch_shield": rs.clutch_shield,
     }
 
 
-def generate_word(level: int, difficulty: str) -> str:
+def generate_word(level: int, difficulty: str, theme_id: str | None = None, boss: bool = False) -> str:
+    if theme_id:
+        themed = get_theme_word(theme_id, level, difficulty, boss)
+        if themed:
+            return themed
+
     if not gemini_client:
         return ""
 
@@ -176,12 +375,16 @@ def _fallback_rhyme(word: str) -> str:
     return f"It rhymes with a word ending in '{ending}'."
 
 
-def generate_hint(word: str, hint_type: str) -> str:
+def generate_hint(word: str, hint_type: str, theme: dict | None = None) -> str:
     normalized = (hint_type or "context").strip().lower()
-    cache_key = (word.strip().upper(), normalized)
+    theme_id = theme.get("id") if theme else ""
+    cache_key = (word.strip().upper(), normalized, theme_id)
     cached = _hint_cache.get(cache_key)
     if cached:
         return cached
+    theme_line = ""
+    if theme:
+        theme_line = f"Theme: {theme.get('name')} ({theme.get('description')})\n"
 
     if normalized == "usage":
         if not gemini_client:
@@ -191,6 +394,7 @@ def generate_hint(word: str, hint_type: str) -> str:
 
         prompt = (
             "You are generating a usage example for a Wordle-style game.\n"
+            f"{theme_line}"
             f"Target word: {word}\n"
             "Rules:\n"
             "- Write ONE short sentence that uses the target word.\n"
@@ -211,6 +415,7 @@ def generate_hint(word: str, hint_type: str) -> str:
 
         prompt = (
             "Provide ONE English word that rhymes with the target word.\n"
+            f"{theme_line}"
             f"Target word: {word}\n"
             "Rules:\n"
             "- Return only the rhyming word.\n"
@@ -246,6 +451,7 @@ def generate_hint(word: str, hint_type: str) -> str:
     if normalized == "definition":
         prompt = (
             "You are a dictionary.\n"
+            f"{theme_line}"
             f"Target word: {word}\n"
             "Rules:\n"
             "- Provide ONE sentence with a concise definition.\n"
@@ -256,6 +462,7 @@ def generate_hint(word: str, hint_type: str) -> str:
     else:
         prompt = (
             "You are generating a subtle clue for a Wordle-style game.\n"
+            f"{theme_line}"
             f"Target word: {word}\n"
             "Rules:\n"
             "- Do NOT say the target word.\n"
@@ -358,12 +565,25 @@ def _reveal_for_mode(secret: str, mode: str):
     return secret[idx], f"Letter at position {idx + 1}: {secret[idx]}"
 
 
-gm = GameManager(WORDS, word_provider=generate_word, easy_words=EASY_WORDS)
+gm = GameManager(
+    WORDS,
+    word_provider=generate_word,
+    easy_words=EASY_WORDS,
+    theme_options_provider=_theme_options,
+)
+
+@app.get("/api/themes")
+def list_themes():
+    return {"themes": [_theme_public(theme) for theme in THEMES]}
 
 
 @app.post("/api/run/start")
-def start_run():
-    rs = gm.start_run()
+def start_run(payload: StartRunIn | None = None):
+    theme_id = (payload.theme_id if payload else DEFAULT_THEME_ID) or DEFAULT_THEME_ID
+    theme_id = theme_id.strip().lower() if theme_id else ""
+    if theme_id and theme_id not in THEMES_BY_ID:
+        theme_id = DEFAULT_THEME_ID
+    rs = gm.start_run(theme_id=theme_id)
     return run_state_to_dict(rs)
 
 
@@ -382,20 +602,15 @@ def submit_guess(run_id: str, payload: GuessIn):
         raise HTTPException(status_code=400, detail=f"Guess must be {DEFAULT_WORD_LEN} letters.")
     if not guess.isalpha():
         raise HTTPException(status_code=400, detail="Letters only.")
-    if gemini_client:
-        gemini_result = gemini_validates_word(guess)
-        if gemini_result is True:
-            if not gm.is_valid_guess(guess):
+    if not gm.is_valid_guess(guess):
+        if gemini_client:
+            gemini_result = gemini_validates_word(guess)
+            if gemini_result is True:
                 gm.add_word(guess)
-        elif gemini_result is False:
-            raise HTTPException(status_code=400, detail="Not in dictionary.")
+            else:
+                raise HTTPException(status_code=400, detail="Not in dictionary.")
         else:
-            raise HTTPException(
-                status_code=503,
-                detail="Dictionary check unavailable. Try again.",
-            )
-    elif not gm.is_valid_guess(guess):
-        raise HTTPException(status_code=400, detail="Not in dictionary.")
+            raise HTTPException(status_code=400, detail="Not in dictionary.")
 
     rs = gm.submit_guess(run_id, guess)
     response = run_state_to_dict(rs)
@@ -424,6 +639,24 @@ def choose_powerup(run_id: str, payload: PowerupChoiceIn):
         "state": run_state_to_dict(rs),
         "added": chosen,
     }
+
+
+@app.post("/api/run/{run_id}/choose_theme")
+def choose_theme(run_id: str, payload: ThemeChoiceIn):
+    try:
+        rs = gm.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found.") from exc
+    if not rs.pending_theme_choice:
+        return run_state_to_dict(rs)
+    theme_id = payload.theme_id.strip().lower()
+    if theme_id not in THEMES_BY_ID:
+        raise HTTPException(status_code=400, detail="Invalid theme.")
+    allowed = {opt.get("id") for opt in rs.theme_options}
+    if allowed and theme_id not in allowed:
+        raise HTTPException(status_code=400, detail="Theme not available.")
+    rs = gm.apply_theme_choice(run_id, theme_id)
+    return run_state_to_dict(rs)
 
 @app.post("/api/run/{run_id}/use_powerup")
 def use_powerup(run_id: str, payload: UsePowerupIn):
@@ -515,7 +748,7 @@ def use_powerup(run_id: str, payload: UsePowerupIn):
         hint_type = chosen.get("value") or "definition"
         if hint_type == "definition_or_usage":
             hint_type = "definition"
-        hint = generate_hint(rs.secret, hint_type)
+        hint = generate_hint(rs.secret, hint_type, THEMES_BY_ID.get(rs.theme_id))
     if chosen and chosen.get("type") == "reveal" and reveal_message is None:
         reveal_letter, reveal_message = _reveal_for_mode(rs.secret, chosen.get("value"))
     if chosen and chosen.get("type") == "time" and time_bonus_seconds is None:
@@ -561,7 +794,7 @@ def get_run_hint(run_id: str, payload: RunHintIn):
         rs = gm.get_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found.") from exc
-    hint = generate_hint(rs.secret, payload.hint_type or "context")
+    hint = generate_hint(rs.secret, payload.hint_type or "context", THEMES_BY_ID.get(rs.theme_id))
     return {"hint": hint}
 
 

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "nature",
+    "name": "Nature",
+    "description": "Plants, animals, landscapes",
+    "prompt_seed": "nature, outdoors, plants, animals"
+  },
+  {
+    "id": "food",
+    "name": "Food",
+    "description": "Ingredients and dishes",
+    "prompt_seed": "foods, cooking, ingredients"
+  },
+  {
+    "id": "sports",
+    "name": "Sports",
+    "description": "Games, gear, actions",
+    "prompt_seed": "sports, athletics, equipment"
+  },
+  {
+    "id": "tech",
+    "name": "Tech",
+    "description": "Computers, internet, devices",
+    "prompt_seed": "technology, computing, internet"
+  },
+  {
+    "id": "music",
+    "name": "Music",
+    "description": "Instruments and sound",
+    "prompt_seed": "music, instruments, audio"
+  }
+]

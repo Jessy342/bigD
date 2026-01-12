@@ -1813,6 +1813,7 @@ html {
   --timer-progress: 1;
   --timer-hue: 210;
   --timer-urgency: 0;
+  --theme-hue: 230;
   position: relative;
   display: flex;
   align-items: flex-start;
@@ -1822,11 +1823,25 @@ html {
   min-height: 100vh;
 }
 
+.game-shell::after {
+  content: "";
+  position: absolute;
+  inset: -200px -180px -200px -180px;
+  background:
+    radial-gradient(70% 70% at 18% 22%, hsl(var(--theme-hue) 70% 40% / 0.35), transparent 70%),
+    radial-gradient(60% 60% at 82% 78%, hsl(var(--theme-hue) 65% 35% / 0.25), transparent 75%);
+  filter: blur(22px);
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 0;
+}
+
 .game-shell::before {
   content: "";
   position: absolute;
   inset: -220px -180px -220px -180px;
   background:
+    radial-gradient(65% 65% at 10% 60%, hsl(var(--theme-hue) 60% 30% / 0.2), transparent 75%),
     radial-gradient(60% 60% at 82% 20%, hsl(var(--timer-hue) 80% 55% / 0.45), transparent 70%),
     radial-gradient(55% 55% at 78% 60%, hsl(var(--timer-hue) 70% 45% / 0.35), transparent 75%),
     radial-gradient(70% 70% at 20% 80%, hsl(var(--timer-hue) 70% 35% / 0.25), transparent 80%);
@@ -2022,6 +2037,16 @@ html {
   gap: 12px;
 }
 
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.theme-grid-choice {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .powerup-card {
   text-align: left;
   background: rgba(26, 31, 58, 0.5);
@@ -2036,6 +2061,26 @@ html {
   transform: translateY(-2px);
 }
 
+.theme-card {
+  text-align: left;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 16px;
+  padding: 16px;
+  transition: transform 0.2s ease, background 0.2s ease, border 0.2s ease, box-shadow 0.2s ease;
+}
+
+.theme-card:hover {
+  background: rgba(26, 31, 58, 0.7);
+  transform: translateY(-2px);
+}
+
+.theme-card-active {
+  border-color: rgba(129, 140, 248, 0.9);
+  box-shadow: 0 0 18px rgba(129, 140, 248, 0.35);
+  background: rgba(30, 41, 59, 0.6);
+}
+
 @keyframes powerup-pop {
   0% {
     opacity: 0;
@@ -2048,6 +2093,10 @@ html {
 }
 
 .powerup-card-animate {
+  animation: powerup-pop 0.35s ease both;
+}
+
+.theme-card-animate {
   animation: powerup-pop 0.35s ease both;
 }
 

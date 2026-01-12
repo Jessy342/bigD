@@ -176,6 +176,9 @@ class RunState:
     run_id: str
     level: int = 1
     secret: str = ""
+    theme_id: str = ""
+    pending_theme_choice: bool = False
+    theme_options: List[dict] = field(default_factory=list)
     guesses: List[str] = field(default_factory=list)
     feedback: List[List[LetterState]] = field(default_factory=list)
     score: int = 0
@@ -228,8 +231,9 @@ class GameManager:
     def __init__(
         self,
         words: List[str],
-        word_provider: Optional[Callable[[int, str], str]] = None,
+        word_provider: Optional[Callable[..., str]] = None,
         easy_words: Optional[List[str]] = None,
+        theme_options_provider: Optional[Callable[[str], List[dict]]] = None,
     ):
         self.easy_words = sorted(set(easy_words or []))
         merged_words = sorted(set(words).union(self.easy_words))
@@ -237,6 +241,7 @@ class GameManager:
         self.word_set = set(self.words)
         self.word_entries = self._build_word_entries(self.words)
         self.word_provider = word_provider
+        self.theme_options_provider = theme_options_provider
         self.runs: Dict[str, RunState] = {}
 
     def _build_word_entries(self, words: List[str]) -> List[WordEntry]:
@@ -266,12 +271,23 @@ class GameManager:
             candidates = [entry.word for entry in self.word_entries]
         return random.choice(candidates)
 
-    def _new_secret(self, level: int) -> str:
+    def _new_secret(self, rs: RunState, level: int) -> str:
         if self.word_provider:
             try:
-                candidate = (self.word_provider(level, difficulty_label(level)) or "").strip().upper()
+                candidate = (
+                    self.word_provider(
+                        level=level,
+                        difficulty=difficulty_label(level),
+                        theme_id=rs.theme_id,
+                        boss=is_boss_level(level),
+                    )
+                    or ""
+                ).strip().upper()
             except TypeError:
-                candidate = (self.word_provider() or "").strip().upper()
+                try:
+                    candidate = (self.word_provider(level, difficulty_label(level)) or "").strip().upper()
+                except TypeError:
+                    candidate = (self.word_provider() or "").strip().upper()
             except Exception:
                 candidate = ""
             if len(candidate) == DEFAULT_WORD_LEN and candidate.isalpha():
@@ -284,10 +300,10 @@ class GameManager:
         rs.difficulty = difficulty_label(difficulty_level)
         rs.boss_level = is_boss_level(difficulty_level)
 
-    def start_run(self) -> RunState:
+    def start_run(self, theme_id: str = "") -> RunState:
         run_id = str(uuid.uuid4())
-        rs = RunState(run_id=run_id)
-        rs.secret = self._new_secret(self._difficulty_level(rs))
+        rs = RunState(run_id=run_id, theme_id=theme_id or "")
+        rs.secret = self._new_secret(rs, self._difficulty_level(rs))
         self._apply_level_settings(rs)
         self.runs[run_id] = rs
         return rs
@@ -357,6 +373,10 @@ class GameManager:
             rs.last_score_delta = score_delta
             rs.score += rs.last_score_delta
             rs.pending_powerups = self._roll_powerups()
+            if rs.boss_level:
+                rs.pending_theme_choice = True
+                if self.theme_options_provider:
+                    rs.theme_options = self.theme_options_provider(rs.theme_id)
 
         # If failed, end the run on this level.
         if rs.failed:
@@ -402,6 +422,8 @@ class GameManager:
 
         rs.inventory.append(chosen)
         rs.pending_powerups = []
+        if rs.pending_theme_choice:
+            return rs, chosen
         self._advance_level(rs, completed=True)
         return rs, chosen
 
@@ -426,10 +448,12 @@ class GameManager:
         if completed:
             rs.completed_levels += 1
         rs.level += 1
-        rs.secret = self._new_secret(self._difficulty_level(rs))
+        rs.secret = self._new_secret(rs, self._difficulty_level(rs))
         rs.guesses = []
         rs.feedback = []
         rs.pending_powerups = []
+        rs.pending_theme_choice = False
+        rs.theme_options = []
         rs.last_score_delta = 0
         rs.extra_rows = 0
         rs.last_effect_messages = []
@@ -495,3 +519,11 @@ class GameManager:
         multiplier = difficulty_multiplier(level)
         guess_bonus = max(0, (DEFAULT_MAX_GUESSES - guesses_used)) * 10
         return (base * multiplier) + (guess_bonus * multiplier)
+
+    def apply_theme_choice(self, run_id: str, theme_id: str) -> RunState:
+        rs = self.get_run(run_id)
+        rs.theme_id = theme_id
+        rs.pending_theme_choice = False
+        rs.theme_options = []
+        self._advance_level(rs, completed=True)
+        return rs
