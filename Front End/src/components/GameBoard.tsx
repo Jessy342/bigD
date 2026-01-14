@@ -1,14 +1,10 @@
-import { useState, useEffect, useCallback, useMemo, type CSSProperties } from 'react';
-import { GameGrid } from './GameGrid';
-import { Keyboard } from './Keyboard';
+import { useState, useEffect, useCallback, useMemo, type CSSProperties, type KeyboardEvent } from 'react';
 import { GameModal } from './GameModal';
 import { StartScreen } from './StartScreen';
-import { Trophy, Gamepad2, RotateCcw, SkipForward, Timer, Hash, Lightbulb, Star, Palette } from 'lucide-react';
-import { getKeyboardLetterStates, type LetterState } from '../utils/gameLogic';
+import { GuessList, type GuessEntry } from './GuessList';
+import { Trophy, Gamepad2, RotateCcw, SkipForward, Timer, Lightbulb, Palette } from 'lucide-react';
 import { toast } from 'sonner';
 
-const DEFAULT_WORD_LENGTH = 5;
-const DEFAULT_MAX_GUESSES = 6;
 const RUN_TIME_SECONDS = 5 * 60;
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 const THEME_PALETTE: Record<string, { primary: string; border: string; hue: number }> = {
@@ -38,15 +34,13 @@ type Theme = {
 type RunState = {
   run_id: string;
   level: number;
-  guesses: string[];
-  feedback: Array<Array<LetterState>>;
+  guesses: GuessEntry[];
+  best_rank: number | null;
   won: boolean;
   failed: boolean;
   pending_powerups: Powerup[];
   skip_available: boolean;
   skip_in_levels: number;
-  word_len: number;
-  max_guesses: number;
   score: number;
   last_score_delta: number;
   difficulty: string;
@@ -57,7 +51,7 @@ type RunState = {
   pending_theme_choice: boolean;
   theme_options: Theme[];
   inventory: Powerup[];
-  clutch_shield: number;
+  similarity_reveal_remaining: number;
 };
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -98,8 +92,8 @@ export function GameBoard() {
   const [hintLoading, setHintLoading] = useState(false);
   const [timerFreezeSeconds, setTimerFreezeSeconds] = useState(0);
   const [timerSlowSeconds, setTimerSlowSeconds] = useState(0);
-  const [streakBankOpen, setStreakBankOpen] = useState(false);
-  const [pendingStreakBankId, setPendingStreakBankId] = useState<string | null>(null);
+  const [startLoading, setStartLoading] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
   const [stats, setStats] = useState({
     gamesPlayed: 0,
     gamesWon: 0,
@@ -108,16 +102,12 @@ export function GameBoard() {
   const [themes, setThemes] = useState<Theme[]>([]);
   const [selectedThemeId, setSelectedThemeId] = useState<string | null>(null);
 
-  const wordLength = run?.word_len ?? DEFAULT_WORD_LENGTH;
-  const maxGuesses = run?.max_guesses ?? DEFAULT_MAX_GUESSES;
   const guesses = run?.guesses ?? [];
-  const evaluations = run?.feedback ?? [];
   const level = run?.level ?? 1;
   const pendingPowerups = run?.pending_powerups ?? [];
   const powerupPending = pendingPowerups.length > 0;
   const inventory = run?.inventory ?? [];
   const elapsedTime = Math.max(0, RUN_TIME_SECONDS - remainingSeconds);
-  const score = run?.score ?? 0;
   const difficulty = run?.difficulty ?? 'easy';
   const bossLevel = run?.boss_level ?? false;
   const themePending = run?.pending_theme_choice ?? false;
@@ -132,8 +122,7 @@ export function GameBoard() {
     themes.find((theme) => theme.id === themeId)?.description ||
     '';
   const themeChoicesSource = themeOptions.length ? themeOptions : themes;
-  const themeChoices = themeChoicesSource.slice(0, 2);
-  const clutchShield = run?.clutch_shield ?? 0;
+  const themeChoices = themeChoicesSource.slice(0, 3);
   const runPaused = powerupPending || themePending;
   const timeRatio = Math.max(0, Math.min(1, remainingSeconds / RUN_TIME_SECONDS));
   const urgency = Math.max(0, Math.min(1, (0.35 - timeRatio) / 0.35));
@@ -142,6 +131,10 @@ export function GameBoard() {
     () => THEME_PALETTE[themeId] ?? THEME_PALETTE.default,
     [themeId],
   );
+  const themeClass = useMemo(() => {
+    const safe = (themeId || 'default').replace(/[^a-z0-9_-]/gi, '');
+    return `theme-${safe || 'default'}`;
+  }, [themeId]);
   const timerStyle = useMemo(
     () =>
       ({
@@ -153,11 +146,6 @@ export function GameBoard() {
         ['--border' as const]: themeTokens.border,
       }) as CSSProperties,
     [timeRatio, timerHue, urgency, themeTokens],
-  );
-
-  const letterStates = useMemo(
-    () => getKeyboardLetterStates(guesses, evaluations),
-    [guesses, evaluations],
   );
 
   useEffect(() => {
@@ -183,6 +171,7 @@ export function GameBoard() {
       } catch (error) {
         if (!cancelled) {
           toast.error('Failed to load themes.');
+          setStartError('Backend not reachable. Start the server on port 8000.');
         }
       }
     };
@@ -234,21 +223,19 @@ export function GameBoard() {
   ]);
 
   useEffect(() => {
-    if (!run || !run.failed || gameStatus === 'lost') {
+    if (remainingSeconds > 0 || gameStatus === 'lost') {
       return;
     }
     setGameStatus('lost');
-    setStats((prev) => {
-      const next = {
-        gamesPlayed: prev.gamesPlayed + 1,
-        gamesWon: prev.gamesWon,
-        currentStreak: 0,
-      };
-      localStorage.setItem('wordle-stats', JSON.stringify(next));
-      return next;
-    });
-    toast.error('No guesses left. Run over.');
-  }, [run, gameStatus]);
+    const newStats = {
+      gamesPlayed: stats.gamesPlayed + 1,
+      gamesWon: stats.gamesWon,
+      currentStreak: 0,
+    };
+    setStats(newStats);
+    localStorage.setItem('wordle-stats', JSON.stringify(newStats));
+    toast.error("Time's up! Run over.");
+  }, [remainingSeconds, gameStatus, stats]);
 
   useEffect(() => {
     if (!run) {
@@ -257,12 +244,12 @@ export function GameBoard() {
     setHintOpen(false);
     setHintText('');
     setHintLoading(false);
-    setStreakBankOpen(false);
-    setPendingStreakBankId(null);
   }, [run?.level]);
 
   const startGame = useCallback(async () => {
     try {
+      setStartLoading(true);
+      setStartError(null);
       const payload = selectedThemeId ? { theme_id: selectedThemeId } : undefined;
       const data = await api<RunState>('/api/run/start', {
         method: 'POST',
@@ -278,10 +265,17 @@ export function GameBoard() {
       setTimerSlowSeconds(0);
       setHintOpen(false);
       setHintText('');
-      setStreakBankOpen(false);
-      setPendingStreakBankId(null);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to start run.');
+      const message = error instanceof Error ? error.message : 'Failed to start run.';
+      if (/failed to fetch|network/i.test(message)) {
+        setStartError('Backend not reachable. Start the server on port 8000.');
+        toast.error('Backend not reachable. Start the server on port 8000.');
+      } else {
+        setStartError(message);
+        toast.error(message);
+      }
+    } finally {
+      setStartLoading(false);
     }
   }, [selectedThemeId]);
 
@@ -296,8 +290,8 @@ export function GameBoard() {
     setTimerSlowSeconds(0);
     setHintOpen(false);
     setHintText('');
-    setStreakBankOpen(false);
-    setPendingStreakBankId(null);
+    setStartError(null);
+    setStartLoading(false);
   }, []);
 
   const handleRunError = useCallback(
@@ -330,43 +324,6 @@ export function GameBoard() {
     });
   }, []);
 
-  const consumeClutchShield = useCallback(async () => {
-    if (!run) {
-      return;
-    }
-    try {
-      const data = await api<{ state: RunState }>(`/api/run/${run.run_id}/consume_clutch`, {
-        method: 'POST',
-      });
-      setRun(data.state);
-    } catch (error) {
-      handleRunError(error, 'Failed to consume clutch shield.');
-    }
-  }, [run, handleRunError]);
-
-  useEffect(() => {
-    if (remainingSeconds > 0 || gameStatus === 'lost') {
-      return;
-    }
-    if (clutchShield > 0) {
-      setRemainingSeconds(5);
-      setTimerFreezeSeconds(0);
-      setTimerSlowSeconds(0);
-      consumeClutchShield();
-      toast.info('Clutch Shield activated. +5 seconds.');
-      return;
-    }
-    setGameStatus('lost');
-    const newStats = {
-      gamesPlayed: stats.gamesPlayed + 1,
-      gamesWon: stats.gamesWon,
-      currentStreak: 0,
-    };
-    setStats(newStats);
-    localStorage.setItem('wordle-stats', JSON.stringify(newStats));
-    toast.error("Time's up! Run over.");
-  }, [remainingSeconds, gameStatus, stats, clutchShield, consumeClutchShield]);
-
   const skipLevel = useCallback(async () => {
     if (!run || runPaused || gameStatus !== 'playing') {
       return;
@@ -376,7 +333,12 @@ export function GameBoard() {
       const data = await api<RunState>(`/api/run/${run.run_id}/skip`, { method: 'POST' });
       setRun(data);
       if (data.level === previousLevel) {
-        toast.error('Skip not available yet.');
+        const remaining = data.skip_in_levels;
+        if (remaining > 0) {
+          toast.error(`Skip available in ${remaining} level${remaining === 1 ? '' : 's'}.`);
+        } else {
+          toast.error('Skip not available yet.');
+        }
       } else {
         toast.info('Level skipped.');
       }
@@ -433,7 +395,7 @@ export function GameBoard() {
   );
 
   const useInventoryPowerup = useCallback(
-    async (inventoryId: string, options?: { choice?: string; streak?: number }) => {
+    async (inventoryId: string) => {
       if (!run || runPaused || gameStatus !== 'playing') {
         return;
       }
@@ -443,8 +405,7 @@ export function GameBoard() {
           used: Powerup | null;
           messages?: string[];
           hint: string | null;
-          reveal_letter: string | null;
-          reveal_message: string | null;
+          related_word: string | null;
           time_bonus_seconds: number | null;
           time_penalty_seconds: number | null;
           timer_freeze_seconds: number | null;
@@ -453,8 +414,6 @@ export function GameBoard() {
           method: 'POST',
           body: JSON.stringify({
             inventory_id: inventoryId,
-            choice: options?.choice,
-            streak: options?.streak,
           }),
         });
         setRun(data.state);
@@ -462,19 +421,12 @@ export function GameBoard() {
           toast.error('Powerup not available.');
           return;
         }
-        if (data.used.id === 'streak_bank' && options?.streak) {
-          const nextStats = { ...stats, currentStreak: 0 };
-          setStats(nextStats);
-          localStorage.setItem('wordle-stats', JSON.stringify(nextStats));
-        }
         pushMessages(data.messages);
         if (data.hint) {
-          toast.success(data.hint, { duration: 5000 });
+          toast.success(data.hint, { duration: 6000 });
         }
-        if (data.reveal_message) {
-          toast.success(data.reveal_message, { duration: 5000 });
-        } else if (data.reveal_letter) {
-          toast.success(`Revealed letter: ${data.reveal_letter}`, { duration: 5000 });
+        if (data.related_word) {
+          toast.success(`Related word: ${data.related_word}`, { duration: 6000 });
         }
         if (data.time_bonus_seconds) {
           setRemainingSeconds((prev) => prev + Number(data.time_bonus_seconds));
@@ -494,7 +446,7 @@ export function GameBoard() {
         handleRunError(error, 'Failed to use powerup.');
       }
     },
-    [run, runPaused, gameStatus, handleRunError, pushMessages, stats],
+    [run, runPaused, gameStatus, handleRunError, pushMessages],
   );
 
   const requestHint = useCallback(async () => {
@@ -523,8 +475,8 @@ export function GameBoard() {
     }
 
     const guess = currentGuess.trim().toUpperCase();
-    if (guess.length !== wordLength) {
-      toast.error('Not enough letters!');
+    if (!guess) {
+      toast.error('Enter a word to guess.');
       return;
     }
     if (!/^[A-Z]+$/.test(guess)) {
@@ -537,12 +489,10 @@ export function GameBoard() {
       const data = await api<
         RunState & {
           effect_messages?: string[];
-          time_bonus_seconds?: number;
-          time_penalty_seconds?: number;
         }
       >(`/api/run/${run.run_id}/guess`, {
         method: 'POST',
-        body: JSON.stringify({ guess }),
+        body: JSON.stringify({ guess_word: guess }),
       });
       setRun(data);
       setCurrentGuess('');
@@ -550,14 +500,6 @@ export function GameBoard() {
       if (delta <= 0) {
         toast.error('Guess not accepted.');
         return;
-      }
-      if (data.time_bonus_seconds) {
-        setRemainingSeconds((prev) => prev + Number(data.time_bonus_seconds));
-        toast.info(`+${data.time_bonus_seconds} seconds`);
-      }
-      if (data.time_penalty_seconds) {
-        setRemainingSeconds((prev) => Math.max(0, prev - Number(data.time_penalty_seconds)));
-        toast.error(`-${data.time_penalty_seconds} seconds`);
       }
       pushMessages(data.effect_messages);
       setTotalGuesses((prev) => prev + delta);
@@ -576,75 +518,18 @@ export function GameBoard() {
       setCurrentGuess('');
       handleRunError(error, 'Guess failed.');
     }
-  }, [run, runPaused, gameStatus, currentGuess, wordLength, stats, handleRunError, pushMessages]);
+  }, [run, runPaused, gameStatus, currentGuess, stats, handleRunError, pushMessages]);
 
-  const handleKeyPress = useCallback(
-    (key: string) => {
-      if (gameStatus !== 'playing' || runPaused) {
-        return;
-      }
-
-      if (key === 'ENTER') {
+  const handleGuessKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === 'Enter') {
         handleGuessSubmit();
-        return;
-      }
-
-      if (key === 'BACKSPACE') {
-        setCurrentGuess((prev) => prev.slice(0, -1));
-        return;
-      }
-
-      if (currentGuess.length < wordLength) {
-        setCurrentGuess((prev) => prev + key);
       }
     },
-    [gameStatus, runPaused, handleGuessSubmit, currentGuess.length, wordLength],
+    [handleGuessSubmit],
   );
 
-  useEffect(() => {
-    const handlePhysicalKeyPress = (e: KeyboardEvent) => {
-      if (!gameStarted || gameStatus !== 'playing' || runPaused) {
-        return;
-      }
-
-      if (e.key === 'Enter') {
-        handleKeyPress('ENTER');
-      } else if (e.key === 'Backspace') {
-        handleKeyPress('BACKSPACE');
-      } else if (/^[a-zA-Z]$/.test(e.key)) {
-        handleKeyPress(e.key.toUpperCase());
-      }
-    };
-
-    window.addEventListener('keydown', handlePhysicalKeyPress);
-    return () => window.removeEventListener('keydown', handlePhysicalKeyPress);
-  }, [handleKeyPress, gameStarted, gameStatus, runPaused]);
-
-  const handleStreakBankChoice = useCallback(
-    (choice: 'time' | 'score') => {
-      if (!pendingStreakBankId) {
-        setStreakBankOpen(false);
-        return;
-      }
-      if (stats.currentStreak <= 0) {
-        toast.error('No streak to bank yet.');
-        setStreakBankOpen(false);
-        setPendingStreakBankId(null);
-        return;
-      }
-      useInventoryPowerup(pendingStreakBankId, { choice, streak: stats.currentStreak });
-      setStreakBankOpen(false);
-      setPendingStreakBankId(null);
-    },
-    [pendingStreakBankId, stats.currentStreak, useInventoryPowerup],
-  );
-
-  const formatTime = (seconds: number) => {
-    const safeSeconds = Math.max(0, Math.ceil(seconds));
-    const mins = Math.floor(safeSeconds / 60);
-    const secs = safeSeconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
+  const bestRankDisplay = run?.best_rank ?? null;
 
   if (!gameStarted) {
     return (
@@ -654,100 +539,90 @@ export function GameBoard() {
         themes={themes}
         selectedThemeId={selectedThemeId}
         onSelectTheme={setSelectedThemeId}
+        startError={startError}
+        startLoading={startLoading}
       />
     );
   }
 
   return (
-    <div className="game-shell" style={timerStyle}>
+    <div className={`game-shell ${themeClass}`} style={timerStyle}>
       <div className="game-main">
         <div className="game-panel">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 bg-primary rounded-lg flex items-center justify-center shadow-lg shadow-primary/50">
-                <Gamepad2 className="w-7 h-7 text-white" />
+          <header className="game-topbar">
+            <div className="game-brand">
+              <div className="game-brand-badge">
+                <Gamepad2 className="game-brand-icon" />
               </div>
-              <div>
-                <h1 className="text-white">ROUGLE</h1>
-                <p className="text-sm text-gray-400">Guess the 5-letter word</p>
+              <div className="game-brand-text">
+                <h1>ROUGLE</h1>
+                <p>Guess the word by its context</p>
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="game-actions">
               <button
                 onClick={requestHint}
-                className="px-4 py-2 bg-purple-600/20 hover:bg-purple-600/30 rounded-lg border border-purple-600/50 transition-colors flex items-center gap-2"
+                className="game-action game-action--hint"
                 title="Get a hint"
                 disabled={!run || runPaused || gameStatus !== 'playing' || hintLoading}
               >
-                <Lightbulb className="w-4 h-4 text-purple-500" />
-                <span className="text-sm text-purple-500">{hintLoading ? 'Thinking...' : 'Hint'}</span>
+                <Lightbulb className="game-action-icon" />
+                <span>{hintLoading ? 'Thinking...' : 'Hint'}</span>
               </button>
 
               <button
                 onClick={skipLevel}
-                className="px-4 py-2 bg-yellow-600/20 hover:bg-yellow-600/30 rounded-lg border border-yellow-600/50 transition-colors flex items-center gap-2"
+                className="game-action game-action--skip"
                 title="Skip Level"
                 disabled={!run || runPaused || gameStatus !== 'playing' || !run.skip_available}
               >
-                <SkipForward className="w-4 h-4 text-yellow-500" />
-                <span className="text-sm text-yellow-500">Skip</span>
+                <SkipForward className="game-action-icon" />
+                <span>
+                  {run?.skip_available ? 'Skip' : `Skip ${run?.skip_in_levels ?? 0}`}
+                </span>
               </button>
 
               <button
                 onClick={restartRun}
-                className="px-4 py-2 bg-red-600/20 hover:bg-red-600/30 rounded-lg border border-red-600/50 transition-colors flex items-center gap-2"
+                className="game-action game-action--restart"
                 title="Restart Run"
               >
-                <RotateCcw className="w-4 h-4 text-red-500" />
-                <span className="text-sm text-red-500">Restart</span>
+                <RotateCcw className="game-action-icon" />
+                <span>Restart</span>
               </button>
             </div>
-          </div>
+          </header>
 
-          <div className="flex flex-wrap justify-center gap-3 mb-6">
-            <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
-              <div className="flex items-center justify-center gap-2 mb-1">
-                <Trophy className="w-4 h-4 text-primary" />
-                <span className="text-white">Lv {level}</span>
+          <section className="game-stats">
+            <div className="game-stat-card game-stat-card--level">
+              <div className="game-stat-row">
+                <Trophy className="game-stat-icon" />
+                <span className="game-stat-value">LV {level}</span>
               </div>
-              <p className="text-xs text-gray-400">Level</p>
+              <div className="game-stat-meta">
+                <span className={`game-stat-meta-item ${bossLevel ? 'game-stat-meta-item--boss' : ''}`}>
+                  {(bossLevel ? 'Boss' : difficulty).toUpperCase()}
+                </span>
+                <span className="game-stat-meta-item">
+                  BEST {bestRankDisplay ? `#${bestRankDisplay}` : '--'}
+                </span>
+                <span className="game-stat-meta-item">{guesses.length} GUESSES</span>
+              </div>
             </div>
 
-            <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
-              <div className="flex items-center justify-center gap-2 mb-1">
-                <Hash className="w-4 h-4 text-orange-500" />
-                <span className="text-white">{guesses.length}/{maxGuesses}</span>
+            <div className="game-stat-card game-stat-card--theme">
+              <div className="game-stat-row">
+                <Palette className="game-stat-icon" />
+                <span className="game-stat-value">{(themeName || 'Theme').toUpperCase()}</span>
               </div>
-              <p className="text-xs text-gray-400">Guesses</p>
+              <span className="game-stat-sub">
+                {(themeDescription || 'Pick a theme to start.').toUpperCase()}
+              </span>
             </div>
+          </section>
 
-            <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
-              <div className="flex items-center justify-center gap-2 mb-1">
-                <Star className="w-4 h-4 text-green-500" />
-                <span className="text-white">{score}</span>
-              </div>
-              <p className="text-xs text-gray-400">Score</p>
-            </div>
-
-            <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
-              <div className="flex items-center justify-center gap-2 mb-1">
-                <Trophy className={`w-4 h-4 ${bossLevel ? 'text-red-500' : 'text-primary'}`} />
-                <span className="text-white">{bossLevel ? 'Boss' : difficulty}</span>
-              </div>
-              <p className="text-xs text-gray-400">Difficulty</p>
-            </div>
-
-            <div className="flex-1 min-w-[180px] max-w-[210px] bg-card/50 rounded-lg p-3 border border-primary/30 text-center">
-              <div className="flex items-center justify-center gap-2 mb-1">
-                <Palette className="w-4 h-4 text-purple-400" />
-                <span className="text-white">{themeName || 'Theme'}</span>
-              </div>
-              <p className="text-xs text-gray-400">{themeDescription || 'Theme'}</p>
-            </div>
-          </div>
-
-          <div className="inventory-panel">
+          <section className="inventory-panel">
             <div className="inventory-header">
               <span className="inventory-title">Inventory</span>
               <span className="inventory-count">{inventory.length} item{inventory.length === 1 ? '' : 's'}</span>
@@ -757,7 +632,6 @@ export function GameBoard() {
                 {inventory.map((powerup, index) => {
                   const inventoryId = powerup.instance_id ?? powerup.id;
                   const inventoryKey = powerup.instance_id ?? `${powerup.id}-${index}`;
-                  const isStreakBank = powerup.id === 'streak_bank';
                   return (
                     <div key={inventoryKey} className="inventory-card">
                       <div className="inventory-text">
@@ -766,17 +640,10 @@ export function GameBoard() {
                       </div>
                       <button
                         className="inventory-use"
-                        onClick={() => {
-                          if (isStreakBank) {
-                            setPendingStreakBankId(inventoryId);
-                            setStreakBankOpen(true);
-                            return;
-                          }
-                          useInventoryPowerup(inventoryId);
-                        }}
+                        onClick={() => useInventoryPowerup(inventoryId)}
                         disabled={!run || runPaused || gameStatus !== 'playing'}
                       >
-                        {isStreakBank ? 'Bank' : 'Use'}
+                        Use
                       </button>
                     </div>
                   );
@@ -785,25 +652,30 @@ export function GameBoard() {
             ) : (
               <div className="inventory-empty">No powerups yet. Win a level to earn one.</div>
             )}
-          </div>
+          </section>
 
-          <div>
-            <GameGrid
-              guesses={guesses}
-              currentGuess={currentGuess}
-              evaluations={evaluations}
-              maxGuesses={maxGuesses}
-              wordLength={wordLength}
+          <section className="game-guess-board">
+            <GuessList guesses={guesses} />
+          </section>
+
+          <div className="game-input-bar">
+            <input
+              type="text"
+              value={currentGuess}
+              onChange={(event) => setCurrentGuess(event.target.value)}
+              onKeyDown={handleGuessKeyDown}
+              placeholder="enter word here"
+              className="game-input"
+              disabled={!run || runPaused || gameStatus !== 'playing'}
             />
+            <button
+              className="game-input-submit"
+              onClick={handleGuessSubmit}
+              disabled={!run || runPaused || gameStatus !== 'playing'}
+            >
+              Enter
+            </button>
           </div>
-        </div>
-
-        <div className="game-panel game-keyboard">
-          <Keyboard
-            onKeyPress={handleKeyPress}
-            letterStates={letterStates}
-            disabled={gameStatus !== 'playing' || runPaused}
-          />
         </div>
       </div>
 
@@ -868,12 +740,11 @@ export function GameBoard() {
 
       <GameModal
         isOpen={gameStatus === 'lost'}
-        gameStatus={gameStatus}
-        answer="?????"
         guesses={guesses.length}
         level={level}
         totalGuesses={totalGuesses}
         elapsedTime={elapsedTime}
+        bestRank={bestRankDisplay}
         stats={stats}
         onPlayAgain={restartRun}
       />
@@ -897,42 +768,17 @@ export function GameBoard() {
           </div>
         </div>
       )}
-
-      {streakBankOpen && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-gradient-to-br from-[#1a1f3a] to-[#0a0e27] border-2 border-primary/50 rounded-2xl p-8 max-w-md w-full shadow-2xl shadow-primary/20">
-            <div className="text-center mb-4">
-              <h2 className="text-white mb-2">Streak Bank</h2>
-              <p className="text-gray-400 text-sm">
-                Bank your streak of {stats.currentStreak} into time or score.
-              </p>
-            </div>
-            <div className="streak-bank-actions">
-              <button
-                onClick={() => handleStreakBankChoice('time')}
-                className="streak-bank-button"
-              >
-                Bank to Time
-              </button>
-              <button
-                onClick={() => handleStreakBankChoice('score')}
-                className="streak-bank-button"
-              >
-                Bank to Score
-              </button>
-            </div>
-            <button
-              onClick={() => {
-                setStreakBankOpen(false);
-                setPendingStreakBankId(null);
-              }}
-              className="streak-bank-cancel"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
+
+function formatTime(seconds: number) {
+  const safeSeconds = Math.max(0, Math.ceil(seconds));
+  const mins = Math.floor(safeSeconds / 60);
+  const secs = safeSeconds % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+
+
+

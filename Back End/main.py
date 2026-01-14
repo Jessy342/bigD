@@ -21,10 +21,10 @@ from game import (
     GameManager,
     load_words,
     load_easy_words,
-    DEFAULT_WORD_LEN,
     RARE_LETTERS,
     VOWELS,
 )
+from semantic import SemanticRanker
 
 DEFAULT_THEMES = [
     {
@@ -111,10 +111,18 @@ app.add_middleware(
 
 BASE_DIR = Path(__file__).resolve().parent
 WORDS = load_words(str(BASE_DIR / "words.txt"))
-EASY_WORDS = load_easy_words(str(BASE_DIR / "words.txt"))
+EASY_WORDS = load_easy_words(WORDS)
 THEMES = load_themes(BASE_DIR / "themes.json")
 THEMES_BY_ID = {theme["id"]: theme for theme in THEMES}
 DEFAULT_THEME_ID = THEMES[0]["id"] if THEMES else ""
+
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+embedding_error = ""
+_ranker = None
+try:
+    _ranker = SemanticRanker(WORDS, model_name=EMBEDDING_MODEL)
+except Exception as exc:
+    embedding_error = str(exc)
 
 # Gemini client reads GEMINI_API_KEY from environment variable
 gemini_client = None
@@ -133,12 +141,19 @@ THEME_BANK_MIN = int(os.getenv("THEME_BANK_MIN", "12"))
 THEME_BANK_REFILL = int(os.getenv("THEME_BANK_REFILL", "36"))
 THEME_CANDIDATE_COUNT = int(os.getenv("THEME_CANDIDATE_COUNT", "40"))
 THEME_RECENT_LIMIT = int(os.getenv("THEME_RECENT_LIMIT", "50"))
+THEME_MIN_WORD_LEN = int(os.getenv("THEME_MIN_WORD_LEN", os.getenv("MIN_WORD_LEN", "3")))
+THEME_MAX_WORD_LEN = int(os.getenv("THEME_MAX_WORD_LEN", os.getenv("MAX_WORD_LEN", "12")))
 _gemini_pool = ThreadPoolExecutor(max_workers=2)
 _hint_cache = {}
 _word_validation_cache = {}
 _theme_word_banks: dict[str, list[str]] = {}
 _theme_recent: dict[str, list[str]] = {}
-ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def rank_guess(guess: str, secret: str):
+    if not _ranker:
+        raise RuntimeError("Embedding model unavailable. Install sentence-transformers and its dependencies.")
+    return _ranker.rank_guess(guess, secret)
 
 
 def gemini_generate_text(prompt: str) -> str:
@@ -169,7 +184,7 @@ def _theme_public(theme: dict) -> dict:
     }
 
 
-def _theme_options(current_theme_id: str, count: int = 2) -> list[dict]:
+def _theme_options(current_theme_id: str, count: int = 3) -> list[dict]:
     options = [_theme_public(theme) for theme in THEMES if theme.get("id") != current_theme_id]
     if len(options) <= count:
         return options
@@ -206,20 +221,20 @@ def _generate_theme_candidates(theme: dict, difficulty: str, boss: bool) -> list
         "boss": "rare",
     }.get(difficulty_label, "common")
     prompt = (
-        f"Generate {THEME_CANDIDATE_COUNT} English words that are exactly 5 letters long.\n"
+        f"Generate {THEME_CANDIDATE_COUNT} English words between {THEME_MIN_WORD_LEN} and {THEME_MAX_WORD_LEN} letters long.\n"
         f"Theme: {theme.get('name')} ({theme.get('description')})\n"
         f"Focus: {theme.get('prompt_seed')}\n"
         f"Difficulty: {difficulty_label} ({difficulty_hint})\n"
         "Rules:\n"
         "- Output ONLY the words, one per line.\n"
         "- No proper nouns or acronyms.\n"
-        "- Avoid plurals ending in S if possible.\n"
         "- No punctuation, numbering, or extra text."
     )
     text = gemini_generate_text(prompt)
     if not text:
         return []
-    tokens = re.findall(r"[A-Za-z]{5}", text)
+    pattern = rf"[A-Za-z]{{{THEME_MIN_WORD_LEN},{THEME_MAX_WORD_LEN}}}"
+    tokens = re.findall(pattern, text)
     results: list[str] = []
     seen: set[str] = set()
     for token in tokens:
@@ -264,7 +279,8 @@ def get_theme_word(theme_id: str, level: int, difficulty: str, boss: bool) -> st
 
 
 class GuessIn(BaseModel):
-    guess: str
+    guess_word: str | None = None
+    guess: str | None = None
 
 
 class PowerupChoiceIn(BaseModel):
@@ -273,11 +289,12 @@ class PowerupChoiceIn(BaseModel):
 
 class HintIn(BaseModel):
     word: str
-    hint_type: str = "definition"  # could be: definition, usage, category, context
+    hint_type: str = "definition"  # could be: definition, category, context
 
 
 class RunHintIn(BaseModel):
     hint_type: str = "context"
+
 
 class UsePowerupIn(BaseModel):
     inventory_id: str
@@ -293,20 +310,28 @@ class ThemeChoiceIn(BaseModel):
     theme_id: str
 
 
+def _guess_entry_to_dict(entry) -> dict:
+    return {
+        "word": entry.word,
+        "rank": entry.rank,
+        "similarity": entry.similarity,
+        "timestamp": entry.timestamp,
+        "show_similarity": entry.show_similarity,
+    }
+
+
 def run_state_to_dict(rs):
     theme = THEMES_BY_ID.get(rs.theme_id) if rs.theme_id else None
     return {
         "run_id": rs.run_id,
         "level": rs.level,
-        "guesses": rs.guesses,
-        "feedback": rs.feedback,
+        "guesses": [_guess_entry_to_dict(entry) for entry in rs.guesses],
+        "best_rank": rs.best_rank,
         "won": rs.won,
         "failed": rs.failed,
         "pending_powerups": rs.pending_powerups,
         "skip_available": rs.skip_available,
         "skip_in_levels": rs.skip_in_levels(),
-        "word_len": DEFAULT_WORD_LEN,
-        "max_guesses": rs.max_guesses,
         "score": rs.score,
         "last_score_delta": rs.last_score_delta,
         "difficulty": rs.difficulty,
@@ -317,7 +342,7 @@ def run_state_to_dict(rs):
         "pending_theme_choice": rs.pending_theme_choice,
         "theme_options": rs.theme_options,
         "inventory": rs.inventory,
-        "clutch_shield": rs.clutch_shield,
+        "similarity_reveal_remaining": rs.similarity_reveal_remaining,
     }
 
 
@@ -326,29 +351,6 @@ def generate_word(level: int, difficulty: str, theme_id: str | None = None, boss
         themed = get_theme_word(theme_id, level, difficulty, boss)
         if themed:
             return themed
-
-    if not gemini_client:
-        return ""
-
-    prompt = (
-        "Generate one random 5-letter English word for a Wordle-style game.\n"
-        f"Difficulty: {difficulty}.\n"
-        "Easy should be common everyday words. Hard should be more obscure words.\n"
-        "Boss should be rare/uncommon words that are still valid English.\n"
-        "Rules:\n"
-        "- Return only the word.\n"
-        "- Exactly 5 letters.\n"
-        "- No punctuation or extra text."
-    )
-
-    text = gemini_generate_text(prompt).upper()
-    if not text:
-        return ""
-
-    cleaned = "".join(ch if ch.isalpha() else " " for ch in text)
-    for token in cleaned.split():
-        if len(token) == DEFAULT_WORD_LEN and token.isalpha():
-            return token
     return ""
 
 
@@ -365,14 +367,47 @@ def _fallback_hint(word: str) -> str:
 
     return f"It is a {len(word)}-letter word with " + ", ".join(details) + "."
 
+
 def _fallback_usage(word: str) -> str:
     cleaned = word.strip().lower()
     return f'Example: "{cleaned}" appears in this sentence.'
+
 
 def _fallback_rhyme(word: str) -> str:
     cleaned = word.strip().lower()
     ending = cleaned[-2:] if len(cleaned) >= 2 else cleaned
     return f"It rhymes with a word ending in '{ending}'."
+
+
+def generate_related_word(word: str, theme: dict | None = None) -> str:
+    if not gemini_client:
+        return ""
+    theme_line = ""
+    if theme:
+        theme_line = f"Theme: {theme.get('name')} ({theme.get('description')})\n"
+    prompt = (
+        "Provide ONE English word that is closely related to the target word.\n"
+        f"{theme_line}"
+        f"Target word: {word}\n"
+        "Rules:\n"
+        "- Return only the related word.\n"
+        "- Do NOT return the target word.\n"
+        "- 3 to 12 letters."
+    )
+    related_text = gemini_generate_text(prompt)
+    tokens = []
+    for part in (related_text or "").split():
+        cleaned = "".join(ch for ch in part if ch.isalpha())
+        if cleaned:
+            tokens.append(cleaned)
+    candidate = ""
+    for token in tokens:
+        if token.upper() != word.strip().upper():
+            candidate = token
+            break
+    if candidate and candidate.upper() != word.strip().upper():
+        return candidate.upper()
+    return ""
 
 
 def generate_hint(word: str, hint_type: str, theme: dict | None = None) -> str:
@@ -459,9 +494,19 @@ def generate_hint(word: str, hint_type: str, theme: dict | None = None) -> str:
             "- Keep it under 12 words.\n"
             "Return only the definition."
         )
+    elif normalized == "category":
+        prompt = (
+            "You are providing a category label for a word guessing game.\n"
+            f"{theme_line}"
+            f"Target word: {word}\n"
+            "Rules:\n"
+            "- Provide a 1 to 3 word category or type.\n"
+            "- Do NOT include the target word.\n"
+            "Return only the category."
+        )
     else:
         prompt = (
-            "You are generating a subtle clue for a Wordle-style game.\n"
+            "You are generating a subtle clue for a word guessing game.\n"
             f"{theme_line}"
             f"Target word: {word}\n"
             "Rules:\n"
@@ -542,35 +587,14 @@ def gemini_validates_word(word: str):
     return False
 
 
-def _reveal_for_mode(secret: str, mode: str):
-    if not secret:
-        return None, None
-    normalized = (mode or "first").strip().lower()
-    length = len(secret)
-    if normalized == "first":
-        return secret[0], f"First letter: {secret[0]}"
-    if normalized == "last":
-        return secret[-1], f"Last letter: {secret[-1]}"
-    if normalized == "random":
-        idx = random.randrange(length)
-        return secret[idx], f"Letter at position {idx + 1}: {secret[idx]}"
-    if normalized == "vowel":
-        vowel_indices = [i for i, ch in enumerate(secret) if ch in VOWELS]
-        if vowel_indices:
-            idx = random.choice(vowel_indices)
-            return secret[idx], f"Vowel at position {idx + 1}: {secret[idx]}"
-        idx = random.randrange(length)
-        return secret[idx], f"Letter at position {idx + 1}: {secret[idx]}"
-    idx = random.randrange(length)
-    return secret[idx], f"Letter at position {idx + 1}: {secret[idx]}"
-
-
 gm = GameManager(
     WORDS,
+    rank_guess=rank_guess,
     word_provider=generate_word,
     easy_words=EASY_WORDS,
     theme_options_provider=_theme_options,
 )
+
 
 @app.get("/api/themes")
 def list_themes():
@@ -583,7 +607,10 @@ def start_run(payload: StartRunIn | None = None):
     theme_id = theme_id.strip().lower() if theme_id else ""
     if theme_id and theme_id not in THEMES_BY_ID:
         theme_id = DEFAULT_THEME_ID
-    rs = gm.start_run(theme_id=theme_id)
+    try:
+        rs = gm.start_run(theme_id=theme_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start run: {exc}") from exc
     return run_state_to_dict(rs)
 
 
@@ -597,13 +624,13 @@ def submit_guess(run_id: str, payload: GuessIn):
     if rs.pending_powerups or rs.won or rs.failed:
         return run_state_to_dict(rs)
 
-    guess = payload.guess.strip().upper()
-    if len(guess) != DEFAULT_WORD_LEN:
-        raise HTTPException(status_code=400, detail=f"Guess must be {DEFAULT_WORD_LEN} letters.")
+    guess = (payload.guess_word or payload.guess or "").strip().upper()
+    if not guess:
+        raise HTTPException(status_code=400, detail="Guess required.")
     if not guess.isalpha():
         raise HTTPException(status_code=400, detail="Letters only.")
     if not gm.is_valid_guess(guess):
-        if gemini_client:
+        if gemini_client and LENIENT_WORD_VALIDATION:
             gemini_result = gemini_validates_word(guess)
             if gemini_result is True:
                 gm.add_word(guess)
@@ -612,17 +639,14 @@ def submit_guess(run_id: str, payload: GuessIn):
         else:
             raise HTTPException(status_code=400, detail="Not in dictionary.")
 
+    if not _ranker:
+        raise HTTPException(status_code=503, detail="Embedding model unavailable.")
+
     rs = gm.submit_guess(run_id, guess)
     response = run_state_to_dict(rs)
     if rs.last_effect_messages:
         response["effect_messages"] = rs.last_effect_messages
-    if rs.last_time_bonus_seconds:
-        response["time_bonus_seconds"] = rs.last_time_bonus_seconds
-    if rs.last_time_penalty_seconds:
-        response["time_penalty_seconds"] = rs.last_time_penalty_seconds
     rs.last_effect_messages = []
-    rs.last_time_bonus_seconds = 0
-    rs.last_time_penalty_seconds = 0
     return response
 
 
@@ -658,12 +682,12 @@ def choose_theme(run_id: str, payload: ThemeChoiceIn):
     rs = gm.apply_theme_choice(run_id, theme_id)
     return run_state_to_dict(rs)
 
+
 @app.post("/api/run/{run_id}/use_powerup")
 def use_powerup(run_id: str, payload: UsePowerupIn):
     rs, chosen = gm.use_powerup(run_id, payload.inventory_id)
     hint = None
-    reveal_letter = None
-    reveal_message = None
+    related_word = None
     time_bonus_seconds = None
     time_penalty_seconds = None
     timer_freeze_seconds = None
@@ -673,111 +697,56 @@ def use_powerup(run_id: str, payload: UsePowerupIn):
         return {"state": run_state_to_dict(rs), "used": None}
 
     powerup_id = chosen.get("id") or ""
-    powerup_type = chosen.get("type") or ""
-
-    if powerup_id == "extra_row":
-        if rs.extra_rows < 2:
-            rs.extra_rows += 1
-            messages.append("Extra Row added (+1 guess).")
-        else:
-            messages.append("Extra Row already maxed (+2).")
+    if powerup_id == "time_burst":
+        time_bonus_seconds = chosen.get("value")
+        if time_bonus_seconds:
+            messages.append(f"+{time_bonus_seconds} seconds.")
     elif powerup_id == "micro_pause":
         timer_freeze_seconds = 2
         messages.append("Micro Pause activated.")
     elif powerup_id == "slow_time":
         timer_slow_seconds = 10
         messages.append("Slow Time activated.")
-    elif powerup_id == "perfect_clear_bonus":
-        rs.perfect_clear_pending += 1
-        messages.append("Perfect Clear armed for your next win.")
-    elif powerup_id == "clutch_shield":
-        rs.clutch_shield += 1
-        messages.append("Clutch Shield armed.")
-    elif powerup_id == "letter_exclusion_scan":
-        secret_letters = set(rs.secret)
-        options = [ch for ch in ALPHABET if ch not in secret_letters]
-        reveal = random.sample(options, k=min(3, len(options)))
-        messages.append(f"Not in word: {', '.join(reveal)}.")
-    elif powerup_id == "letter_inclusion_scan":
-        letter = random.choice(list(set(rs.secret)))
-        messages.append(f"Contains letter: {letter}.")
-    elif powerup_id == "position_reveal":
-        idx = random.randrange(len(rs.secret))
-        reveal_letter = rs.secret[idx]
-        reveal_message = f"Position {idx + 1}: {rs.secret[idx]}."
-        messages.append(reveal_message)
-    elif powerup_id == "hot_cold_rating":
-        rs.hot_cold_pending = 1
-        messages.append("Hot/Cold rating armed for your next guess.")
     elif powerup_id == "skip_cooldown_reducer":
         rs.skip_cooldown_reduction_value = max(rs.skip_cooldown_reduction_value, 1)
         rs.skip_cooldown_reduction_levels = max(rs.skip_cooldown_reduction_levels, 5)
         messages.append("Skip cooldown reduced for the next 5 levels.")
     elif powerup_id == "skip_refresh":
+        rs.last_skip_level = -999
         messages.append("Skip is ready.")
-    elif powerup_id == "skip_insurance":
-        rs.skip_insurance += 1
-        messages.append("Skip Insurance armed.")
-    elif powerup_id == "score_multiplier":
-        rs.score_multiplier = max(rs.score_multiplier, 1.5)
-        rs.score_multiplier_levels += 2
-        messages.append("Score multiplier armed for the next 2 wins.")
-    elif powerup_id == "double_or_nothing":
-        rs.double_or_nothing_pending = 1
-        messages.append("Double or Nothing armed for the next level.")
-    elif powerup_id == "streak_bank":
-        choice = (payload.choice or "").strip().lower()
-        streak = max(0, int(payload.streak or 0))
-        if choice not in ("time", "score"):
-            raise HTTPException(status_code=400, detail="Streak Bank requires choice: time or score.")
-        if choice == "time":
-            time_bonus_seconds = streak * STREAK_BANK_TIME_PER_STREAK
-            if time_bonus_seconds:
-                messages.append(f"Streak banked: +{time_bonus_seconds} seconds.")
-            else:
-                messages.append("No streak to bank yet.")
+    elif powerup_id == "similarity_reveal":
+        count = int(chosen.get("value") or 0)
+        if count > 0:
+            rs.similarity_reveal_remaining = max(rs.similarity_reveal_remaining, count)
+            messages.append(f"Similarity revealed for the next {count} guesses.")
+    elif powerup_id == "undo_last_guess":
+        if rs.guesses:
+            rs.guesses.pop()
+            rs.best_rank = min((entry.rank for entry in rs.guesses), default=None)
+            messages.append("Last guess removed.")
         else:
-            score_bonus = streak * STREAK_BANK_SCORE_PER_STREAK
-            rs.score += score_bonus
-            if score_bonus:
-                messages.append(f"Streak banked: +{score_bonus} score.")
-            else:
-                messages.append("No streak to bank yet.")
+            messages.append("No guesses to undo.")
 
     if chosen and chosen.get("type") == "hint":
         hint_type = chosen.get("value") or "definition"
-        if hint_type == "definition_or_usage":
-            hint_type = "definition"
-        hint = generate_hint(rs.secret, hint_type, THEMES_BY_ID.get(rs.theme_id))
-    if chosen and chosen.get("type") == "reveal" and reveal_message is None:
-        reveal_letter, reveal_message = _reveal_for_mode(rs.secret, chosen.get("value"))
-    if chosen and chosen.get("type") == "time" and time_bonus_seconds is None:
-        time_bonus_seconds = chosen.get("value")
-        if time_bonus_seconds:
-            messages.append(f"+{time_bonus_seconds} seconds.")
+        if hint_type == "related":
+            related_word = generate_related_word(rs.secret, THEMES_BY_ID.get(rs.theme_id))
+            if not related_word:
+                messages.append("No related word available.")
+        else:
+            hint = generate_hint(rs.secret, hint_type, THEMES_BY_ID.get(rs.theme_id))
+
     return {
         "state": run_state_to_dict(rs),
         "used": chosen,
         "messages": messages,
         "hint": hint,
-        "reveal_letter": reveal_letter,
-        "reveal_message": reveal_message,
+        "related_word": related_word,
         "time_bonus_seconds": time_bonus_seconds,
         "time_penalty_seconds": time_penalty_seconds,
         "timer_freeze_seconds": timer_freeze_seconds,
         "timer_slow_seconds": timer_slow_seconds,
     }
-
-
-@app.post("/api/run/{run_id}/consume_clutch")
-def consume_clutch(run_id: str):
-    try:
-        rs = gm.get_run(run_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Run not found.") from exc
-    if rs.clutch_shield > 0:
-        rs.clutch_shield -= 1
-    return {"state": run_state_to_dict(rs)}
 
 
 @app.post("/api/hint")
@@ -804,6 +773,9 @@ def validation_status():
         "gemini_available": bool(gemini_client),
         "min_confidence": GEMINI_MIN_CONFIDENCE,
         "lenient": LENIENT_WORD_VALIDATION,
+        "embedding_ready": bool(_ranker),
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_error": embedding_error,
     }
 
 
@@ -868,3 +840,4 @@ def serve_frontend_fallback(full_path: str):
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Frontend index not found.")
     return FileResponse(str(index_path))
+

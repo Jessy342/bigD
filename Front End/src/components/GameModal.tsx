@@ -1,14 +1,12 @@
-import { Trophy, XCircle, TrendingUp, Zap, RotateCcw, Timer, Hash } from 'lucide-react';
+import { Trophy, XCircle, TrendingUp, Zap, RotateCcw, Timer, Hash, Target } from 'lucide-react';
 import { motion } from 'motion/react';
 
 interface GameModalProps {
-  isOpen: boolean;
-  gameStatus: 'playing' | 'won' | 'lost';
-  answer: string;
-  guesses: number;
+  isOpen: boolean;  guesses: number;
   level: number;
   totalGuesses: number;
   elapsedTime: number;
+  bestRank: number | null;
   stats: {
     gamesPlayed: number;
     gamesWon: number;
@@ -17,22 +15,19 @@ interface GameModalProps {
   onPlayAgain: () => void;
 }
 
-export function GameModal({ 
-  isOpen, 
-  gameStatus, 
-  answer, 
-  guesses, 
-  level, 
-  totalGuesses, 
-  elapsedTime, 
-  stats, 
-  onPlayAgain 
+export function GameModal({
+  isOpen,  guesses,
+  level,
+  totalGuesses,
+  elapsedTime,
+  bestRank,
+  stats,
+  onPlayAgain,
 }: GameModalProps) {
   if (!isOpen) return null;
 
-  const isWin = gameStatus === 'won';
-  const winRate = stats.gamesPlayed > 0 
-    ? Math.round((stats.gamesWon / stats.gamesPlayed) * 100) 
+  const winRate = stats.gamesPlayed > 0
+    ? Math.round((stats.gamesWon / stats.gamesPlayed) * 100)
     : 0;
 
   const formatTime = (seconds: number) => {
@@ -48,7 +43,6 @@ export function GameModal({
         animate={{ scale: 1, opacity: 1, y: 0 }}
         className="bg-gradient-to-br from-[#1a1f3a] to-[#0a0e27] border-2 border-primary/50 rounded-2xl p-8 max-w-md w-full shadow-2xl shadow-primary/20"
       >
-        {/* Icon & Title */}
         <div className="flex flex-col items-center mb-6">
           <motion.div
             initial={{ scale: 0 }}
@@ -58,7 +52,7 @@ export function GameModal({
           >
             <XCircle className="w-10 h-10 text-white" />
           </motion.div>
-          
+
           <motion.h2
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -67,7 +61,7 @@ export function GameModal({
           >
             Run Over!
           </motion.h2>
-          
+
           <motion.p
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -76,20 +70,8 @@ export function GameModal({
           >
             You reached Level {level}
           </motion.p>
-          
-          <motion.div
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.5 }}
-            className="mt-3 px-6 py-3 bg-primary/20 rounded-lg border border-primary/50"
-          >
-            <span className="text-white tracking-wider">
-              {answer}
-            </span>
-          </motion.div>
         </div>
 
-        {/* Run Stats */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -105,7 +87,17 @@ export function GameModal({
               <span className="text-white">{level}</span>
             </div>
           </div>
-          
+
+          <div className="bg-card/50 rounded-lg p-4 border border-primary/30">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Target className="w-5 h-5 text-indigo-300" />
+                <span className="text-gray-400">Best Rank</span>
+              </div>
+              <span className="text-white">{bestRank ? `#${bestRank}` : '--'}</span>
+            </div>
+          </div>
+
           <div className="bg-card/50 rounded-lg p-4 border border-primary/30">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -115,19 +107,18 @@ export function GameModal({
               <span className="text-white">{formatTime(elapsedTime)}</span>
             </div>
           </div>
-          
+
           <div className="bg-card/50 rounded-lg p-4 border border-primary/30">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Hash className="w-5 h-5 text-blue-500" />
                 <span className="text-gray-400">Total Guesses</span>
               </div>
-              <span className="text-white">{totalGuesses}</span>
+              <span className="text-white">{totalGuesses || guesses}</span>
             </div>
           </div>
         </motion.div>
 
-        {/* Overall Stats Grid */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -141,7 +132,7 @@ export function GameModal({
             </div>
             <p className="text-xs text-gray-400">Runs</p>
           </div>
-          
+
           <div className="bg-card/50 rounded-lg p-4 border border-primary/30 text-center">
             <div className="flex items-center justify-center gap-1 mb-1">
               <Trophy className="w-4 h-4 text-[#10b981]" />
@@ -149,7 +140,7 @@ export function GameModal({
             </div>
             <p className="text-xs text-gray-400">Win Rate</p>
           </div>
-          
+
           <div className="bg-card/50 rounded-lg p-4 border border-primary/30 text-center">
             <div className="flex items-center justify-center gap-1 mb-1">
               <Zap className="w-4 h-4 text-[#f59e0b]" />
@@ -159,7 +150,6 @@ export function GameModal({
           </div>
         </motion.div>
 
-        {/* Play Again Button */}
         <motion.button
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -174,3 +164,4 @@ export function GameModal({
     </div>
   );
 }
+
