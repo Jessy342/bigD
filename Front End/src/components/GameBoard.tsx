@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, type CSSProperties, type Key
 import { GameModal } from './GameModal';
 import { StartScreen } from './StartScreen';
 import { GuessList, type GuessEntry } from './GuessList';
-import { Trophy, Gamepad2, RotateCcw, SkipForward, Timer, Lightbulb, Palette } from 'lucide-react';
+import { Trophy, Gamepad2, RotateCcw, SkipForward, Timer, Lightbulb, Palette, Eye } from 'lucide-react';
 import { toast } from 'sonner';
 
 const RUN_TIME_SECONDS = 5 * 60;
@@ -90,6 +90,9 @@ export function GameBoard() {
   const [hintOpen, setHintOpen] = useState(false);
   const [hintText, setHintText] = useState('');
   const [hintLoading, setHintLoading] = useState(false);
+  const [revealOpen, setRevealOpen] = useState(false);
+  const [revealWord, setRevealWord] = useState('');
+  const [revealLoading, setRevealLoading] = useState(false);
   const [timerFreezeSeconds, setTimerFreezeSeconds] = useState(0);
   const [timerSlowSeconds, setTimerSlowSeconds] = useState(0);
   const [startLoading, setStartLoading] = useState(false);
@@ -244,6 +247,9 @@ export function GameBoard() {
     setHintOpen(false);
     setHintText('');
     setHintLoading(false);
+    setRevealOpen(false);
+    setRevealWord('');
+    setRevealLoading(false);
   }, [run?.level]);
 
   const startGame = useCallback(async () => {
@@ -265,6 +271,9 @@ export function GameBoard() {
       setTimerSlowSeconds(0);
       setHintOpen(false);
       setHintText('');
+      setRevealOpen(false);
+      setRevealWord('');
+      setRevealLoading(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to start run.';
       if (/failed to fetch|network/i.test(message)) {
@@ -290,6 +299,9 @@ export function GameBoard() {
     setTimerSlowSeconds(0);
     setHintOpen(false);
     setHintText('');
+    setRevealOpen(false);
+    setRevealWord('');
+    setRevealLoading(false);
     setStartError(null);
     setStartLoading(false);
   }, []);
@@ -469,6 +481,23 @@ export function GameBoard() {
     }
   }, [run, runPaused, gameStatus, handleRunError]);
 
+  const requestReveal = useCallback(async () => {
+    if (!run || runPaused || gameStatus !== 'playing') {
+      return;
+    }
+    setRevealLoading(true);
+    try {
+      const data = await api<{ word: string }>(`/api/run/${run.run_id}/reveal`);
+      const word = (data.word || '').trim().toUpperCase();
+      setRevealWord(word || 'Unknown');
+      setRevealOpen(true);
+    } catch (error) {
+      handleRunError(error, 'Failed to reveal word.');
+    } finally {
+      setRevealLoading(false);
+    }
+  }, [run, runPaused, gameStatus, handleRunError]);
+
   const handleGuessSubmit = useCallback(async () => {
     if (!run || runPaused || gameStatus !== 'playing') {
       return;
@@ -569,6 +598,16 @@ export function GameBoard() {
               >
                 <Lightbulb className="game-action-icon" />
                 <span>{hintLoading ? 'Thinking...' : 'Hint'}</span>
+              </button>
+
+              <button
+                onClick={requestReveal}
+                className="game-action game-action--reveal"
+                title="Reveal Word"
+                disabled={!run || runPaused || gameStatus !== 'playing' || revealLoading}
+              >
+                <Eye className="game-action-icon" />
+                <span>{revealLoading ? 'Revealing...' : 'Reveal'}</span>
               </button>
 
               <button
@@ -761,6 +800,26 @@ export function GameBoard() {
             </div>
             <button
               onClick={() => setHintOpen(false)}
+              className="w-full mt-3 bg-gradient-to-r from-primary to-indigo-600 hover:from-primary/90 hover:to-indigo-600/90 text-white py-3 rounded-lg transition-all active:scale-95 shadow-lg shadow-primary/30"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {revealOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-gradient-to-br from-[#1a1f3a] to-[#0a0e27] border-2 border-primary/50 rounded-2xl p-8 max-w-md w-full shadow-2xl shadow-primary/20">
+            <div className="text-center mb-4">
+              <h2 className="text-white mb-2">Secret Word</h2>
+              <p className="text-gray-400 text-sm">Revealed for this run.</p>
+            </div>
+            <div className="bg-card/50 rounded-lg p-4 border border-primary/30 text-white text-center text-lg tracking-[0.2em]">
+              {revealWord}
+            </div>
+            <button
+              onClick={() => setRevealOpen(false)}
               className="w-full mt-3 bg-gradient-to-r from-primary to-indigo-600 hover:from-primary/90 hover:to-indigo-600/90 text-white py-3 rounded-lg transition-all active:scale-95 shadow-lg shadow-primary/30"
             >
               Close

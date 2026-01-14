@@ -21,6 +21,8 @@ from game import (
     GameManager,
     load_words,
     load_easy_words,
+    MIN_WORD_LEN,
+    MAX_WORD_LEN,
     RARE_LETTERS,
     VOWELS,
 )
@@ -59,6 +61,25 @@ DEFAULT_THEMES = [
     },
 ]
 
+def _normalize_theme_words(raw_words: object) -> list[str]:
+    if not isinstance(raw_words, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw_words:
+        if not isinstance(item, str):
+            continue
+        word = item.strip().upper()
+        if not word or not word.isalpha():
+            continue
+        if not (MIN_WORD_LEN <= len(word) <= MAX_WORD_LEN):
+            continue
+        if word in seen:
+            continue
+        cleaned.append(word)
+        seen.add(word)
+    return cleaned
+
 
 def load_themes(path: Path) -> list[dict]:
     themes: list[dict] = []
@@ -80,6 +101,7 @@ def load_themes(path: Path) -> list[dict]:
         name = str(item.get("name", "")).strip()
         description = str(item.get("description", "")).strip()
         prompt_seed = str(item.get("prompt_seed", "")).strip()
+        words = _normalize_theme_words(item.get("words", []))
         if not theme_id or theme_id in seen:
             continue
         if not name or not description:
@@ -90,10 +112,23 @@ def load_themes(path: Path) -> list[dict]:
                 "name": name,
                 "description": description,
                 "prompt_seed": prompt_seed or name,
+                "words": words,
             }
         )
         seen.add(theme_id)
     return cleaned
+
+
+def _collect_theme_words(themes: list[dict]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for theme in themes:
+        for word in theme.get("words", []) or []:
+            if word in seen:
+                continue
+            merged.append(word)
+            seen.add(word)
+    return merged
 
 app = FastAPI()
 
@@ -111,8 +146,15 @@ app.add_middleware(
 
 BASE_DIR = Path(__file__).resolve().parent
 WORDS = load_words(str(BASE_DIR / "words.txt"))
-EASY_WORDS = load_easy_words(WORDS)
 THEMES = load_themes(BASE_DIR / "themes.json")
+THEME_WORDS = _collect_theme_words(THEMES)
+if THEME_WORDS:
+    word_set = set(WORDS)
+    for word in THEME_WORDS:
+        if word not in word_set:
+            WORDS.append(word)
+            word_set.add(word)
+EASY_WORDS = load_easy_words(WORDS)
 THEMES_BY_ID = {theme["id"]: theme for theme in THEMES}
 DEFAULT_THEME_ID = THEMES[0]["id"] if THEMES else ""
 
@@ -264,12 +306,36 @@ def _refill_theme_bank(theme_id: str, difficulty: str, boss: bool) -> None:
         bank.append(word)
 
 
+def _refill_theme_bank_static(theme_id: str, allow_repeat: bool = False) -> None:
+    theme = THEMES_BY_ID.get(theme_id)
+    if not theme:
+        return
+    words = theme.get("words") or []
+    if not words:
+        return
+    bank = _theme_word_banks.setdefault(theme_id, [])
+    recent = set(_theme_recent.get(theme_id, []))
+    candidates = [w for w in words if w not in bank and (allow_repeat or w not in recent)]
+    if not candidates and not allow_repeat:
+        candidates = [w for w in words if w not in bank]
+    if not candidates:
+        return
+    random.shuffle(candidates)
+    for word in candidates:
+        if len(bank) >= THEME_BANK_REFILL:
+            break
+        bank.append(word)
+
+
 def get_theme_word(theme_id: str, level: int, difficulty: str, boss: bool) -> str:
     if not theme_id or theme_id not in THEMES_BY_ID:
         return ""
     bank = _theme_word_banks.setdefault(theme_id, [])
     if len(bank) < THEME_BANK_MIN:
         _refill_theme_bank(theme_id, difficulty, boss)
+        _refill_theme_bank_static(theme_id)
+    if not bank:
+        _refill_theme_bank_static(theme_id, allow_repeat=True)
     if bank:
         choice = random.choice(bank)
         bank.remove(choice)
@@ -765,6 +831,15 @@ def get_run_hint(run_id: str, payload: RunHintIn):
         raise HTTPException(status_code=404, detail="Run not found.") from exc
     hint = generate_hint(rs.secret, payload.hint_type or "context", THEMES_BY_ID.get(rs.theme_id))
     return {"hint": hint}
+
+
+@app.get("/api/run/{run_id}/reveal")
+def reveal_run_word(run_id: str):
+    try:
+        rs = gm.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found.") from exc
+    return {"word": rs.secret}
 
 
 @app.get("/api/validation", include_in_schema=False)
