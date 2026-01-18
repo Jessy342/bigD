@@ -202,10 +202,20 @@ DEFAULT_EMBEDDING_MODEL = (
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
 embedding_error = ""
 _ranker = None
-try:
-    _ranker = SemanticRanker(WORDS, model_name=EMBEDDING_MODEL)
-except Exception as exc:
-    embedding_error = str(exc)
+
+
+def _get_ranker():
+    global _ranker, embedding_error
+    if _ranker is not None:
+        return _ranker
+    if embedding_error:
+        return None
+    try:
+        _ranker = SemanticRanker(WORDS, model_name=EMBEDDING_MODEL)
+    except Exception as exc:
+        embedding_error = str(exc)
+        return None
+    return _ranker
 
 # Gemini client reads GEMINI_API_KEY from environment variable
 gemini_client = None
@@ -563,9 +573,13 @@ def _choose_random_concrete_word(words: list[str]) -> str:
 
 
 def rank_guess(guess: str, secret: str):
-    if not _ranker:
-        raise RuntimeError("Embedding model unavailable. Install sentence-transformers and its dependencies.")
-    return _ranker.rank_guess(guess, secret)
+    ranker = _get_ranker()
+    if not ranker:
+        raise RuntimeError(
+            embedding_error
+            or "Embedding model unavailable. Install sentence-transformers and its dependencies."
+        )
+    return ranker.rank_guess(guess, secret)
 
 
 def gemini_generate_text(prompt: str) -> str:
@@ -1154,8 +1168,9 @@ def submit_guess(run_id: str, payload: GuessIn):
         else:
             raise HTTPException(status_code=400, detail="Not in dictionary.")
 
-    if not _ranker:
-        raise HTTPException(status_code=503, detail="Embedding model unavailable.")
+    if not _get_ranker():
+        detail = embedding_error or "Embedding model unavailable."
+        raise HTTPException(status_code=503, detail=detail)
 
     prev_best_rank = rs.best_rank
     prev_guess_count = len(rs.guesses)

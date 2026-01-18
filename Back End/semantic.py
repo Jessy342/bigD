@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-import numpy as np
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -28,6 +31,8 @@ class SecretIndex:
 
 class SemanticRanker:
     def __init__(self, candidate_words: List[str], model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        if np is None:
+            raise RuntimeError("numpy is required for SemanticRanker.")
         if SentenceTransformer is None:
             raise RuntimeError("sentence-transformers is required for SemanticRanker.")
         self.model = SentenceTransformer(model_name)
