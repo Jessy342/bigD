@@ -17,6 +17,8 @@ except Exception:
 
 DEFAULT_WORD_LEN = 5
 DEFAULT_MAX_GUESSES = 6
+INVENTORY_CAPACITY = int(os.getenv("INVENTORY_CAPACITY", "3"))
+ALLOW_DUPLICATE_POWERUPS: set[str] = set()
 
 BOSS_LEVEL_INTERVAL = int(os.getenv("BOSS_LEVEL_INTERVAL", "5"))
 DEFAULT_SKIP_COOLDOWN_LEVELS = int(os.getenv("SKIP_COOLDOWN_LEVELS", "3"))
@@ -39,6 +41,65 @@ DEFAULT_EASY_WORDS = [
     "RIVER", "SMILE", "SPACE", "STONE", "SWEET", "TABLE", "TRAIN", "WATER",
     "WHITE", "WORLD", "YOUTH",
 ]
+
+RANDOM_THEME_ID = "random"
+IRREGULAR_PLURALS = {
+    "MICE": "MOUSE",
+    "GEESE": "GOOSE",
+    "TEETH": "TOOTH",
+    "FEET": "FOOT",
+    "CHILDREN": "CHILD",
+    "MEN": "MAN",
+    "WOMEN": "WOMAN",
+    "PEOPLE": "PERSON",
+    "WOLVES": "WOLF",
+    "LEAVES": "LEAF",
+    "KNIVES": "KNIFE",
+}
+PLURAL_EXCEPTIONS = {"NEWS", "SERIES", "SPECIES"}
+PLURAL_S_ENDINGS = ("SS", "US", "IS")
+PLURAL_ES_ENDINGS = ("CHES", "SHES", "XES", "ZES", "SES")
+
+
+def is_random_theme(theme_id: str) -> bool:
+    return (theme_id or "").strip().lower() == RANDOM_THEME_ID
+
+
+def normalize_word(word: str, word_set: Optional[set[str]] = None) -> str:
+    cleaned = word.strip().upper()
+    if not cleaned:
+        return cleaned
+    irregular = IRREGULAR_PLURALS.get(cleaned)
+    if irregular:
+        return irregular
+    if cleaned in PLURAL_EXCEPTIONS:
+        return cleaned
+    candidates: List[str] = []
+    if len(cleaned) > 3:
+        if cleaned.endswith("IES"):
+            candidates.append(cleaned[:-3] + "Y")
+        if cleaned.endswith("VES"):
+            candidates.append(cleaned[:-3] + "F")
+            candidates.append(cleaned[:-3] + "FE")
+        if cleaned.endswith(PLURAL_ES_ENDINGS):
+            candidates.append(cleaned[:-2])
+        if cleaned.endswith("S") and not cleaned.endswith(PLURAL_S_ENDINGS):
+            candidates.append(cleaned[:-1])
+        if cleaned.endswith("ES"):
+            candidates.append(cleaned[:-2])
+    candidates.append(cleaned)
+
+    deduped: List[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    if word_set and len(deduped) > 1:
+        for candidate in deduped:
+            if candidate == cleaned:
+                continue
+            if candidate in word_set:
+                return candidate
+    return deduped[0]
 
 
 @dataclass(frozen=True)
@@ -206,6 +267,15 @@ class RunState:
     skip_cooldown_reduction_levels: int = 0
     skip_cooldown_reduction_value: int = 0
     last_effect_messages: List[str] = field(default_factory=list)
+    failed_flag: bool = False
+    no_powerup_reward: bool = False
+    anchor_word: str = ""
+    anchor_rank: Optional[int] = None
+    momentum_bonus_active: bool = False
+    momentum_bonus_value: int = 0
+    skip_insurance_active: bool = False
+    safety_net_levels: int = 0
+    expanded_choice_levels: int = 0
 
     # skip cooldown
     last_skip_level: int = -999
@@ -217,15 +287,23 @@ class RunState:
 
     @property
     def failed(self) -> bool:
-        return False
+        return self.failed_flag
+
+    @property
+    def is_random_mode(self) -> bool:
+        return is_random_theme(self.theme_id)
 
     @property
     def skip_available(self) -> bool:
+        if self.is_random_mode:
+            return True
         if self.boss_level:
             return False
         return self.skip_in_levels() == 0
 
     def skip_in_levels(self) -> int:
+        if self.is_random_mode:
+            return 0
         cooldown = max(0, self.skip_cooldown_levels - self.skip_cooldown_reduction_value)
         diff = self.level - self.last_skip_level
         remaining = cooldown - diff + 1
@@ -245,11 +323,16 @@ class GameManager:
         merged_words = _dedupe_preserve(words)
         self.words = merged_words
         self.word_set = set(self.words)
+        self.normalized_word_set: set[str] = set()
+        self._rebuild_normalized_word_set()
         self.word_entries = self._build_word_entries(self.words)
         self.word_provider = word_provider
         self.theme_options_provider = theme_options_provider
         self.rank_guess = rank_guess
         self.runs: Dict[str, RunState] = {}
+
+    def _is_random_run(self, rs: RunState) -> bool:
+        return rs.is_random_mode
 
     def _build_word_entries(self, words: List[str]) -> List[WordEntry]:
         scored = sorted(((word, word_frequency_score(word)) for word in words), key=lambda x: x[1])
@@ -260,7 +343,12 @@ class GameManager:
             entries.append(WordEntry(word=word, score=score, percentile=percentile))
         return entries
 
+    def _rebuild_normalized_word_set(self) -> None:
+        self.normalized_word_set = {normalize_word(word, self.word_set) for word in self.word_set}
+
     def _difficulty_level(self, rs: RunState) -> int:
+        if self._is_random_run(rs):
+            return 1
         return rs.completed_levels + 1
 
     def _select_word_for_level(self, level: int) -> str:
@@ -298,11 +386,19 @@ class GameManager:
             except Exception:
                 candidate = ""
             if candidate and candidate.isalpha():
-                self.add_word(candidate)
-                return candidate
-        return self._select_word_for_level(level)
+                normalized = normalize_word(candidate, self.word_set)
+                self.add_word(normalized)
+                return normalized
+        return normalize_word(self._select_word_for_level(level), self.word_set)
 
     def _apply_level_settings(self, rs: RunState) -> None:
+        if self._is_random_run(rs):
+            rs.difficulty = "random"
+            rs.boss_level = False
+            rs.skip_cooldown_levels = 0
+            rs.skip_cooldown_reduction_levels = 0
+            rs.skip_cooldown_reduction_value = 0
+            return
         difficulty_level = self._difficulty_level(rs)
         rs.difficulty = difficulty_label(difficulty_level)
         rs.boss_level = is_boss_level(difficulty_level)
@@ -332,18 +428,22 @@ class GameManager:
         if rs.won or rs.failed:
             return rs
 
-        if not guess.isalpha():
+        normalized_guess = normalize_word(guess, self.word_set)
+        if not normalized_guess.isalpha():
             return rs
-        if guess not in self.word_set:
+        if normalized_guess not in self.normalized_word_set:
+            return rs
+        if any(entry.word == normalized_guess for entry in rs.guesses):
+            rs.last_effect_messages = ["Already guessed. Try a different word."]
             return rs
 
-        rank, similarity = self.rank_guess(guess, rs.secret)
+        rank, similarity = self.rank_guess(normalized_guess, rs.secret)
         show_similarity = rs.similarity_reveal_remaining > 0
         if show_similarity:
             rs.similarity_reveal_remaining -= 1
 
         entry = GuessEntry(
-            word=guess,
+            word=normalized_guess,
             rank=rank,
             similarity=similarity,
             timestamp=time.time(),
@@ -351,15 +451,37 @@ class GameManager:
         )
         rs.guesses.append(entry)
 
+        if rs.anchor_rank is not None and rs.anchor_word:
+            if normalized_guess == rs.anchor_word:
+                rs.last_effect_messages.append("Anchor guess selected.")
+            elif rank < rs.anchor_rank:
+                rs.last_effect_messages.append("Closer than your anchor.")
+            elif rank > rs.anchor_rank:
+                rs.last_effect_messages.append("Farther than your anchor.")
+            else:
+                rs.last_effect_messages.append("Matched your anchor.")
+
         if rs.best_rank is None or rank < rs.best_rank:
             rs.best_rank = rank
 
         if rs.won:
+            if self._is_random_run(rs):
+                return rs
+            if rs.no_powerup_reward:
+                rs.no_powerup_reward = False
+                if rs.boss_level:
+                    rs.pending_powerups = []
+                    rs.pending_theme_choice = True
+                    if self.theme_options_provider:
+                        rs.theme_options = self.theme_options_provider(rs.theme_id)
+                    return rs
+                self._advance_level(rs, completed=True)
+                return rs
             difficulty_level = self._difficulty_level(rs)
             base_score = self._score_for_win(difficulty_level, len(rs.guesses))
             rs.last_score_delta = base_score
             rs.score += rs.last_score_delta
-            rs.pending_powerups = self._roll_powerups()
+            rs.pending_powerups = self._roll_powerups(rs)
             if rs.boss_level:
                 rs.pending_theme_choice = True
                 if self.theme_options_provider:
@@ -367,8 +489,40 @@ class GameManager:
 
         return rs
 
+    def _reset_random_round(self, rs: RunState) -> None:
+        rs.level = 1
+        rs.completed_levels = 0
+        rs.secret = self._new_secret(rs, 1)
+        rs.guesses = []
+        rs.best_rank = None
+        rs.pending_powerups = []
+        rs.pending_theme_choice = False
+        rs.theme_options = []
+        rs.last_score_delta = 0
+        rs.last_effect_messages = []
+        rs.similarity_reveal_remaining = 0
+        rs.score = 0
+        rs.failed_flag = False
+        rs.no_powerup_reward = False
+        rs.anchor_word = ""
+        rs.anchor_rank = None
+        rs.momentum_bonus_active = False
+        rs.momentum_bonus_value = 0
+        rs.skip_insurance_active = False
+        rs.safety_net_levels = 0
+        rs.expanded_choice_levels = 0
+        rs.last_skip_level = -999
+        rs.skip_cooldown_levels = 0
+        rs.skip_cooldown_reduction_levels = 0
+        rs.skip_cooldown_reduction_value = 0
+        rs.boss_level = False
+        rs.difficulty = "random"
+
     def skip_level(self, run_id: str) -> RunState:
         rs = self.get_run(run_id)
+        if self._is_random_run(rs):
+            self._reset_random_round(rs)
+            return rs
         if rs.pending_powerups or rs.won or rs.failed or not rs.skip_available:
             return rs
 
@@ -376,10 +530,13 @@ class GameManager:
         self._advance_level(rs, completed=False)
         return rs
 
-    def choose_powerup(self, run_id: str, powerup_id: str) -> Tuple[RunState, dict]:
+    def choose_powerup(self, run_id: str, powerup_id: str) -> Tuple[RunState, dict, str | None]:
         rs = self.get_run(run_id)
+        if self._is_random_run(rs):
+            rs.pending_powerups = []
+            return rs, {}, "Powerups are disabled in random mode."
         if not rs.pending_powerups:
-            return rs, {}
+            return rs, {}, "No powerup reward available."
 
         chosen = next(
             (
@@ -390,18 +547,37 @@ class GameManager:
             None,
         )
         if not chosen:
-            return rs, {}
+            return rs, {}, "Powerup not available."
+
+        powerup_key = chosen.get("id") or ""
+        inventory_ids = {item.get("id") for item in rs.inventory}
+        if powerup_key in inventory_ids and powerup_key not in ALLOW_DUPLICATE_POWERUPS:
+            rs.pending_powerups = []
+            if rs.pending_theme_choice:
+                return rs, {}, "Duplicate powerup. Reward skipped."
+            self._advance_level(rs, completed=True)
+            return rs, {}, "Duplicate powerup. Reward skipped."
+        if len(rs.inventory) >= INVENTORY_CAPACITY:
+            rs.pending_powerups = []
+            if rs.pending_theme_choice:
+                return rs, {}, "Inventory full. Reward skipped."
+            self._advance_level(rs, completed=True)
+            return rs, {}, "Inventory full. Reward skipped."
 
         rs.inventory.append(chosen)
         rs.pending_powerups = []
         if rs.pending_theme_choice:
-            return rs, chosen
+            return rs, chosen, None
         self._advance_level(rs, completed=True)
-        return rs, chosen
+        return rs, chosen, None
 
     def use_powerup(self, run_id: str, powerup_id: str) -> Tuple[RunState, dict]:
         rs = self.get_run(run_id)
-        if rs.pending_powerups or rs.failed or not rs.inventory:
+        if self._is_random_run(rs):
+            rs.pending_powerups = []
+            rs.inventory = []
+            return rs, {}
+        if (rs.pending_powerups and powerup_id != "reroll_rewards") or rs.failed or not rs.inventory:
             return rs, {}
         idx = next(
             (
@@ -417,6 +593,9 @@ class GameManager:
         return rs, chosen
 
     def _advance_level(self, rs: RunState, completed: bool):
+        if self._is_random_run(rs):
+            self._reset_random_round(rs)
+            return
         if completed:
             rs.completed_levels += 1
         rs.level += 1
@@ -428,6 +607,16 @@ class GameManager:
         rs.theme_options = []
         rs.last_score_delta = 0
         rs.last_effect_messages = []
+        rs.failed_flag = False
+        rs.no_powerup_reward = False
+        rs.anchor_word = ""
+        rs.anchor_rank = None
+        rs.momentum_bonus_active = False
+        rs.momentum_bonus_value = 0
+        rs.skip_insurance_active = False if completed else rs.skip_insurance_active
+        if rs.safety_net_levels > 0:
+            rs.safety_net_levels -= 1
+        rs.expanded_choice_levels = max(0, rs.expanded_choice_levels)
         if rs.skip_cooldown_reduction_levels > 0:
             rs.skip_cooldown_reduction_levels -= 1
             if rs.skip_cooldown_reduction_levels <= 0:
@@ -435,28 +624,54 @@ class GameManager:
                 rs.skip_cooldown_reduction_value = 0
         self._apply_level_settings(rs)
 
+    def reroll_target(self, rs: RunState) -> None:
+        rs.secret = self._new_secret(rs, self._difficulty_level(rs))
+        rs.guesses = []
+        rs.best_rank = None
+        rs.anchor_word = ""
+        rs.anchor_rank = None
+        rs.no_powerup_reward = True
+
     def _powerup_with_instance(self, powerup: dict) -> dict:
         return {**powerup, "instance_id": uuid.uuid4().hex}
 
-    def _roll_powerups(self) -> List[dict]:
-        pool = [
-            {"id": "time_burst", "type": "time", "value": 8, "name": "Time Burst", "desc": "+8 seconds immediately."},
-            {"id": "micro_pause", "type": "timer", "value": 2, "name": "Micro Pause", "desc": "Freeze the timer for 2 seconds."},
-            {"id": "slow_time", "type": "timer", "value": 10, "name": "Slow Time", "desc": "Timer drains at half speed for 10 seconds."},
-            {"id": "gemini_hint_definition", "type": "hint", "value": "definition", "name": "Definition hint", "desc": "Get a concise definition hint."},
-            {"id": "gemini_hint_category", "type": "hint", "value": "category", "name": "Category hint", "desc": "Get the general category."},
-            {"id": "gemini_hint_context", "type": "hint", "value": "context", "name": "Context hint", "desc": "Get a subtle contextual hint."},
-            {"id": "related_word", "type": "hint", "value": "related", "name": "Related word", "desc": "Reveal a nearby concept."},
-            {"id": "similarity_reveal", "type": "utility", "value": 3, "name": "Similarity Scanner", "desc": "Show similarity % for the next 3 guesses."},
-            {"id": "skip_cooldown_reducer", "type": "skip", "value": 1, "name": "Skip Cooldown Reducer", "desc": "Reduce skip cooldown for 5 levels."},
-            {"id": "skip_refresh", "type": "skip", "value": 1, "name": "Skip Refresh", "desc": "Make Skip available immediately."},
-            {"id": "undo_last_guess", "type": "utility", "value": 1, "name": "Undo Guess", "desc": "Remove your most recent guess."},
+    def _powerup_pool(self) -> List[dict]:
+        return [
+            {"id": "semantic_direction", "type": "insight", "value": 1, "name": "Semantic Direction", "desc": "Reveal if the word is abstract or concrete."},
+            {"id": "concept_neighbor", "type": "insight", "value": 1, "name": "Concept Neighbor", "desc": "Reveal a related concept (not a synonym)."},
+            {"id": "functional_hint", "type": "insight", "value": 1, "name": "Functional Hint", "desc": "Reveal what the word is used for."},
+            {"id": "descriptor_hint", "type": "insight", "value": 1, "name": "Descriptor Hint", "desc": "Reveal a common adjective that describes it."},
+            {"id": "undo_guess", "type": "control", "value": 1, "name": "Undo Guess", "desc": "Remove your most recent guess."},
+            {"id": "reroll_target", "type": "control", "value": 1, "name": "Reroll Target", "desc": "Replace the secret word (no reward for this level)."},
+            {"id": "anchor_guess", "type": "control", "value": 1, "name": "Anchor Guess", "desc": "Set a guess as your baseline reference."},
+            {"id": "similarity_reveal", "type": "rank", "value": 3, "name": "Similarity Reveal", "desc": "Show similarity % for the next 3 guesses."},
+            {"id": "comparator", "type": "rank", "value": 1, "name": "Comparator", "desc": "Compare two guesses to see which is closer."},
+            {"id": "gradient_scan", "type": "rank", "value": 1, "name": "Gradient Scan", "desc": "Reveal if the target is near top, middle, or bottom."},
+            {"id": "micro_freeze", "type": "time", "value": 2, "name": "Micro Freeze", "desc": "Freeze the timer for 2 seconds."},
+            {"id": "slow_drain", "type": "time", "value": 10, "name": "Slow Drain", "desc": "Timer drains at half speed for 10 seconds."},
+            {"id": "momentum_bonus", "type": "time", "value": 6, "name": "Momentum Bonus", "desc": "Beat your best rank to gain time."},
+            {"id": "skip_refresh", "type": "skip", "value": 1, "name": "Skip Refresh", "desc": "Reset skip cooldown instantly."},
+            {"id": "skip_insurance", "type": "skip", "value": 1, "name": "Skip Insurance", "desc": "If you fail the next level, skip cooldown resets."},
+            {"id": "skip_cooldown_reducer", "type": "skip", "value": 1, "name": "Cooldown Reducer", "desc": "Reduce skip cooldown for the next 5 levels."},
+            {"id": "expanded_choice", "type": "run", "value": 1, "name": "Expanded Choice", "desc": "Next reward offers 4 options."},
+            {"id": "reroll_rewards", "type": "run", "value": 1, "name": "Reroll Rewards", "desc": "Reroll the current reward selection once."},
+            {"id": "safety_net", "type": "run", "value": 3, "name": "Safety Net", "desc": "First failure in the next 3 levels is ignored."},
         ]
-        picks = random.sample(pool, 3)
+
+    def _roll_powerups(self, rs: RunState, count: Optional[int] = None, consume_expanded: bool = True) -> List[dict]:
+        pool = self._powerup_pool()
+        exclude = {item.get("id") for item in rs.inventory}
+        pool = [item for item in pool if item.get("id") not in exclude]
+        if count is None:
+            count = 4 if rs.expanded_choice_levels > 0 else 3
+        if consume_expanded and rs.expanded_choice_levels > 0:
+            rs.expanded_choice_levels = max(0, rs.expanded_choice_levels - 1)
+        picks = random.sample(pool, min(count, len(pool)))
         return [self._powerup_with_instance(powerup) for powerup in picks]
 
     def is_valid_guess(self, guess: str) -> bool:
-        return guess.strip().upper() in self.word_set
+        normalized = normalize_word(guess, self.word_set)
+        return normalized in self.normalized_word_set
 
     def add_word(self, word: str) -> None:
         cleaned = word.strip().upper()
@@ -465,6 +680,7 @@ class GameManager:
         if cleaned in self.word_set:
             return
         self.word_set.add(cleaned)
+        self._rebuild_normalized_word_set()
 
     def _score_for_win(self, level: int, guesses_used: int) -> int:
         base = 100
@@ -474,6 +690,10 @@ class GameManager:
 
     def apply_theme_choice(self, run_id: str, theme_id: str) -> RunState:
         rs = self.get_run(run_id)
+        if self._is_random_run(rs):
+            rs.pending_theme_choice = False
+            rs.theme_options = []
+            return rs
         rs.theme_id = theme_id
         rs.pending_theme_choice = False
         rs.theme_options = []

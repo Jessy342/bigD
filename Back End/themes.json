@@ -338,5 +338,12 @@
       "SCORE",
       "BALLAD"
     ]
+  },
+  {
+    "id": "random",
+    "name": "Random",
+    "description": "Pure Contexto mode (no timer, no powerups)",
+    "prompt_seed": "random",
+    "words": []
   }
 ]

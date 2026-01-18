@@ -25,6 +25,10 @@ from game import (
     MAX_WORD_LEN,
     RARE_LETTERS,
     VOWELS,
+    RANDOM_THEME_ID,
+    is_random_theme,
+    normalize_word,
+    zipf_frequency,
 )
 from semantic import SemanticRanker
 
@@ -58,6 +62,12 @@ DEFAULT_THEMES = [
         "name": "Music",
         "description": "Instruments and sound",
         "prompt_seed": "music, instruments, audio",
+    },
+    {
+        "id": "random",
+        "name": "Random",
+        "description": "Pure Contexto mode (no timer, no powerups)",
+        "prompt_seed": "random",
     },
 ]
 
@@ -130,6 +140,24 @@ def _collect_theme_words(themes: list[dict]) -> list[str]:
             seen.add(word)
     return merged
 
+
+def _load_random_words(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    words: list[str] = []
+    seen: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip().upper()
+        if not raw or not raw.isalpha():
+            continue
+        if not (MIN_WORD_LEN <= len(raw) <= MAX_WORD_LEN):
+            continue
+        if raw in seen:
+            continue
+        words.append(raw)
+        seen.add(raw)
+    return words
+
 app = FastAPI()
 
 mimetypes.add_type("application/javascript", ".js")
@@ -151,6 +179,13 @@ THEME_WORDS = _collect_theme_words(THEMES)
 if THEME_WORDS:
     word_set = set(WORDS)
     for word in THEME_WORDS:
+        if word not in word_set:
+            WORDS.append(word)
+            word_set.add(word)
+RANDOM_WORDS = _load_random_words(BASE_DIR / "random.txt")
+if RANDOM_WORDS:
+    word_set = set(WORDS)
+    for word in RANDOM_WORDS:
         if word not in word_set:
             WORDS.append(word)
             word_set.add(word)
@@ -179,17 +214,346 @@ LENIENT_WORD_VALIDATION = os.getenv("LENIENT_WORD_VALIDATION", "true").lower() i
 STREAK_BANK_TIME_PER_STREAK = int(os.getenv("STREAK_BANK_TIME_PER_STREAK", "5"))
 STREAK_BANK_SCORE_PER_STREAK = int(os.getenv("STREAK_BANK_SCORE_PER_STREAK", "50"))
 GEMINI_MIN_CONFIDENCE = float(os.getenv("GEMINI_MIN_CONFIDENCE", "0.85"))
+RANDOM_GEMINI_VALIDATE = os.getenv("RANDOM_GEMINI_VALIDATE", "true").lower() in ("1", "true", "yes")
+RANDOM_MIN_ZIPF = float(os.getenv("RANDOM_MIN_ZIPF", "3.6"))
 THEME_BANK_MIN = int(os.getenv("THEME_BANK_MIN", "12"))
 THEME_BANK_REFILL = int(os.getenv("THEME_BANK_REFILL", "36"))
 THEME_CANDIDATE_COUNT = int(os.getenv("THEME_CANDIDATE_COUNT", "40"))
 THEME_RECENT_LIMIT = int(os.getenv("THEME_RECENT_LIMIT", "50"))
 THEME_MIN_WORD_LEN = int(os.getenv("THEME_MIN_WORD_LEN", os.getenv("MIN_WORD_LEN", "3")))
 THEME_MAX_WORD_LEN = int(os.getenv("THEME_MAX_WORD_LEN", os.getenv("MAX_WORD_LEN", "12")))
+RANDOM_BLACKLIST = {
+    "ABILITY",
+    "ABSTRACT",
+    "ACTION",
+    "ADVICE",
+    "ANGER",
+    "ANXIETY",
+    "ATTITUDE",
+    "AWARENESS",
+    "BEHAVIOR",
+    "BELIEF",
+    "CHANGE",
+    "CHAOS",
+    "CHOICE",
+    "CONCEPT",
+    "CONFIDENCE",
+    "CONFLICT",
+    "CONNECTION",
+    "COURAGE",
+    "DATA",
+    "DECISION",
+    "DESIRE",
+    "DESTINY",
+    "DIFFICULTY",
+    "DREAM",
+    "DUTY",
+    "EMOTION",
+    "ENERGY",
+    "EQUALITY",
+    "EVENT",
+    "EVIDENCE",
+    "EXPERIENCE",
+    "FAITH",
+    "FEAR",
+    "FEELING",
+    "FOCUS",
+    "FREEDOM",
+    "FUTURE",
+    "GROWTH",
+    "HAPPINESS",
+    "HEALTH",
+    "HISTORY",
+    "HOPE",
+    "IDEA",
+    "IMAGINATION",
+    "INFORMATION",
+    "INTELLIGENCE",
+    "JOY",
+    "JUSTICE",
+    "KNOWLEDGE",
+    "LOVE",
+    "MEMORY",
+    "MIND",
+    "MOVEMENT",
+    "PAIN",
+    "PASSION",
+    "PEACE",
+    "PLAN",
+    "POWER",
+    "PROCESS",
+    "PROGRESS",
+    "PURPOSE",
+    "QUALITY",
+    "RANDOM",
+    "REASON",
+    "RELATIONSHIP",
+    "RESPONSIBILITY",
+    "RISK",
+    "SCATTER",
+    "SCIENCE",
+    "SENSE",
+    "SKILL",
+    "SOCIETY",
+    "SOLUTION",
+    "SOUND",
+    "SPIRIT",
+    "STRESS",
+    "SUCCESS",
+    "SYSTEM",
+    "TASK",
+    "THEORY",
+    "THOUGHT",
+    "TIME",
+    "TRUTH",
+    "VALUE",
+    "WORK",
+    "RUN",
+    "BUILD",
+    "CREATE",
+    "MAKE",
+    "MOVE",
+    "THINK",
+    "FEEL",
+    "LARGE",
+    "SMALL",
+    "BIG",
+    "HUGE",
+    "TINY",
+    "QUICK",
+    "SLOW",
+    "FAST",
+    "BRIGHT",
+    "DARK",
+    "GOOD",
+    "BAD",
+    "BEST",
+    "WORST",
+    "NEW",
+    "OLD",
+    "YOUNG",
+    "HAPPY",
+    "SAD",
+    "ANGRY",
+    "CALM",
+    "LOUD",
+    "QUIET",
+    "SOFT",
+    "HARD",
+    "HOT",
+    "COLD",
+    "WARM",
+    "COOL",
+    "HIGH",
+    "LOW",
+    "SHORT",
+    "LONG",
+    "EARLY",
+    "LATE",
+    "LEFT",
+    "RIGHT",
+    "NEAR",
+    "FAR",
+    "FULL",
+    "EMPTY",
+    "GO",
+    "GONE",
+    "COME",
+    "CAME",
+    "GET",
+    "GOT",
+    "GIVE",
+    "TAKE",
+    "MAKE",
+    "DO",
+    "USE",
+    "READ",
+    "WRITE",
+    "SPEAK",
+    "SLEEP",
+    "EAT",
+    "DRINK",
+    "PLAY",
+    "WORK",
+    "START",
+    "STOP",
+    "HAPPEN",
+    "BREAK",
+    "BROKE",
+    "BRING",
+    "CARRY",
+    "AARON",
+    "DAVID",
+    "JAMES",
+    "JOHN",
+    "MARY",
+    "SARAH",
+    "PARIS",
+    "LONDON",
+    "TOKYO",
+    "GOOGLE",
+    "NIKE",
+    "ADIDAS",
+    "MICROSOFT",
+    "FACEBOOK",
+    "TESLA",
+    "ALWAYS",
+    "NEVER",
+    "SOON",
+    "THEN",
+    "THERE",
+    "HERE",
+    "VERY",
+    "QUITE",
+    "RATHER",
+    "FAST",
+    "WELL",
+    "AWAY",
+    "UP",
+    "DOWN",
+    "IN",
+    "OUT",
+    "OFF",
+    "ON",
+    "OVER",
+    "UNDER",
+}
+RANDOM_ABSTRACT_SUFFIXES = (
+    "TION",
+    "SION",
+    "MENT",
+    "NESS",
+    "ITY",
+    "ISM",
+    "SHIP",
+    "ANCE",
+    "ENCE",
+    "HOOD",
+    "DOM",
+    "LOGY",
+    "GRAPHY",
+    "PHOBIA",
+    "PHILIA",
+    "CRACY",
+    "NOMY",
+)
+RANDOM_ADVERB_SUFFIXES = ("LY",)
+RANDOM_LY_ALLOWLIST = {
+    "BELLY",
+    "DOLLY",
+    "HOLLY",
+    "JELLY",
+    "LILY",
+    "TROLLEY",
+}
+RANDOM_ING_ALLOWLIST = {
+    "BUILDING",
+    "CEILING",
+    "CLOTHING",
+    "EARRING",
+    "FLOORING",
+    "RAILING",
+    "RING",
+    "ROOFING",
+    "SIDING",
+    "WIRING",
+}
 _gemini_pool = ThreadPoolExecutor(max_workers=2)
 _hint_cache = {}
 _word_validation_cache = {}
 _theme_word_banks: dict[str, list[str]] = {}
 _theme_recent: dict[str, list[str]] = {}
+WORDS_SET = set(WORDS)
+EASY_WORDS_SET = set(EASY_WORDS)
+_random_concrete_cache: dict[str, bool] = {}
+
+
+def _is_random_concrete_word(word: str) -> bool:
+    if not word or not word.isalpha():
+        return False
+    if word in RANDOM_BLACKLIST:
+        return False
+    if not (MIN_WORD_LEN <= len(word) <= MAX_WORD_LEN):
+        return False
+    if any(word.endswith(suffix) for suffix in RANDOM_ADVERB_SUFFIXES):
+        if word not in RANDOM_LY_ALLOWLIST:
+            return False
+    if word.endswith("ING") and word not in RANDOM_ING_ALLOWLIST:
+        return False
+    if len(word) > 4 and word.endswith("ED"):
+        return False
+    for suffix in RANDOM_ABSTRACT_SUFFIXES:
+        if word.endswith(suffix):
+            return False
+    if zipf_frequency:
+        freq = float(zipf_frequency(word.lower(), "en"))
+        if freq < RANDOM_MIN_ZIPF:
+            return False
+    elif EASY_WORDS_SET and word not in EASY_WORDS_SET:
+        return False
+    return True
+
+
+def _build_random_word_pool(words: list[str]) -> list[str]:
+    pool: list[str] = []
+    seen: set[str] = set()
+    for raw in words:
+        cleaned = raw.strip().upper()
+        if not cleaned:
+            continue
+        if not _is_random_concrete_word(cleaned):
+            continue
+        normalized = normalize_word(cleaned, WORDS_SET)
+        if not normalized or normalized in seen:
+            continue
+        if not _is_random_concrete_word(normalized):
+            continue
+        pool.append(normalized)
+        seen.add(normalized)
+    return pool
+
+
+RANDOM_WORD_POOL = _build_random_word_pool(RANDOM_WORDS or WORDS)
+
+
+def _gemini_is_concrete_noun(word: str) -> bool:
+    if not gemini_client or not RANDOM_GEMINI_VALIDATE:
+        return True
+    key = word.strip().upper()
+    cached = _random_concrete_cache.get(key)
+    if cached is not None:
+        return cached
+    prompt = (
+        "Answer with YES or NO only.\n"
+        "Is the following English word a concrete, physical noun for a tangible object you can see and touch?\n"
+        "Reject abstract concepts, actions/verbs, adjectives, emotions, processes, intangible nouns, or proper nouns/names.\n"
+        f"Word: {word}\n"
+        "Answer:"
+    )
+    response = (gemini_generate_text(prompt) or "").strip().upper()
+    if response.startswith("YES"):
+        result = True
+    elif response.startswith("NO"):
+        result = False
+    else:
+        result = False
+    _random_concrete_cache[key] = result
+    return result
+
+
+def _choose_random_concrete_word(words: list[str]) -> str:
+    if not words:
+        return ""
+    candidates = [word for word in words if _is_random_concrete_word(word)]
+    if not candidates:
+        return ""
+    attempts = min(50, len(candidates))
+    for _ in range(attempts):
+        candidate = random.choice(candidates)
+        if not _gemini_is_concrete_noun(candidate):
+            continue
+        return candidate
+    return random.choice(candidates)
 
 
 def rank_guess(guess: str, secret: str):
@@ -227,7 +591,11 @@ def _theme_public(theme: dict) -> dict:
 
 
 def _theme_options(current_theme_id: str, count: int = 3) -> list[dict]:
-    options = [_theme_public(theme) for theme in THEMES if theme.get("id") != current_theme_id]
+    options = [
+        _theme_public(theme)
+        for theme in THEMES
+        if theme.get("id") not in (current_theme_id, RANDOM_THEME_ID)
+    ]
     if len(options) <= count:
         return options
     return random.sample(options, count)
@@ -366,6 +734,7 @@ class UsePowerupIn(BaseModel):
     inventory_id: str
     choice: str | None = None
     streak: int | None = None
+    choices: list[str] | None = None
 
 
 class StartRunIn(BaseModel):
@@ -387,7 +756,18 @@ def _guess_entry_to_dict(entry) -> dict:
 
 
 def run_state_to_dict(rs):
-    theme = THEMES_BY_ID.get(rs.theme_id) if rs.theme_id else None
+    theme = None
+    if rs.theme_id and not rs.is_random_mode:
+        theme = THEMES_BY_ID.get(rs.theme_id)
+    pending_theme_choice = rs.pending_theme_choice
+    theme_options = rs.theme_options
+    inventory = rs.inventory
+    pending_powerups = rs.pending_powerups
+    if rs.is_random_mode:
+        pending_theme_choice = False
+        theme_options = []
+        inventory = []
+        pending_powerups = []
     return {
         "run_id": rs.run_id,
         "level": rs.level,
@@ -395,7 +775,7 @@ def run_state_to_dict(rs):
         "best_rank": rs.best_rank,
         "won": rs.won,
         "failed": rs.failed,
-        "pending_powerups": rs.pending_powerups,
+        "pending_powerups": pending_powerups,
         "skip_available": rs.skip_available,
         "skip_in_levels": rs.skip_in_levels(),
         "score": rs.score,
@@ -405,14 +785,18 @@ def run_state_to_dict(rs):
         "theme_id": rs.theme_id,
         "theme_name": theme.get("name") if theme else "",
         "theme_description": theme.get("description") if theme else "",
-        "pending_theme_choice": rs.pending_theme_choice,
-        "theme_options": rs.theme_options,
-        "inventory": rs.inventory,
+        "pending_theme_choice": pending_theme_choice,
+        "theme_options": theme_options,
+        "inventory": inventory,
         "similarity_reveal_remaining": rs.similarity_reveal_remaining,
+        "random_mode": rs.is_random_mode,
     }
 
 
 def generate_word(level: int, difficulty: str, theme_id: str | None = None, boss: bool = False) -> str:
+    if theme_id and is_random_theme(theme_id):
+        pool = RANDOM_WORD_POOL or WORDS
+        return _choose_random_concrete_word(pool) if pool else ""
     if theme_id:
         themed = get_theme_word(theme_id, level, difficulty, boss)
         if themed:
@@ -445,6 +829,14 @@ def _fallback_rhyme(word: str) -> str:
     return f"It rhymes with a word ending in '{ending}'."
 
 
+def _fallback_function(word: str) -> str:
+    return "It is commonly used for everyday tasks."
+
+
+def _fallback_descriptor(word: str) -> str:
+    return "practical"
+
+
 def generate_related_word(word: str, theme: dict | None = None) -> str:
     if not gemini_client:
         return ""
@@ -458,6 +850,7 @@ def generate_related_word(word: str, theme: dict | None = None) -> str:
         "Rules:\n"
         "- Return only the related word.\n"
         "- Do NOT return the target word.\n"
+        "- Do NOT return a synonym or a plural/singular form of the word.\n"
         "- 3 to 12 letters."
     )
     related_text = gemini_generate_text(prompt)
@@ -466,12 +859,14 @@ def generate_related_word(word: str, theme: dict | None = None) -> str:
         cleaned = "".join(ch for ch in part if ch.isalpha())
         if cleaned:
             tokens.append(cleaned)
+    target_norm = normalize_word(word, WORDS_SET)
     candidate = ""
     for token in tokens:
-        if token.upper() != word.strip().upper():
-            candidate = token
-            break
-    if candidate and candidate.upper() != word.strip().upper():
+        if normalize_word(token, WORDS_SET) == target_norm:
+            continue
+        candidate = token
+        break
+    if candidate:
         return candidate.upper()
     return ""
 
@@ -505,6 +900,54 @@ def generate_hint(word: str, hint_type: str, theme: dict | None = None) -> str:
         hint = gemini_generate_text(prompt)
         if not hint:
             hint = _fallback_usage(word)
+        _hint_cache[cache_key] = hint
+        return hint
+
+    if normalized in ("functional", "function", "purpose"):
+        if not gemini_client:
+            hint = _fallback_function(word)
+            _hint_cache[cache_key] = hint
+            return hint
+        prompt = (
+            "Provide ONE short sentence about what the word is commonly used for.\n"
+            f"{theme_line}"
+            f"Word: {word}\n"
+            "Rules:\n"
+            "- Do NOT include the word itself.\n"
+            "- Do NOT include direct synonyms.\n"
+            "- Keep it under 12 words.\n"
+            "Return only the sentence."
+        )
+        hint = gemini_generate_text(prompt)
+        if not hint or word in hint.upper():
+            hint = _fallback_function(word)
+        _hint_cache[cache_key] = hint
+        return hint
+
+    if normalized in ("descriptor", "adjective", "describe"):
+        if not gemini_client:
+            hint = _fallback_descriptor(word)
+            _hint_cache[cache_key] = hint
+            return hint
+        prompt = (
+            "Provide ONE common adjective that describes the word.\n"
+            f"{theme_line}"
+            f"Word: {word}\n"
+            "Rules:\n"
+            "- Return ONLY the adjective, one word.\n"
+            "- Do NOT return the target word or synonyms."
+        )
+        descriptor = gemini_generate_text(prompt)
+        token = ""
+        for part in (descriptor or "").split():
+            cleaned = "".join(ch for ch in part if ch.isalpha())
+            if cleaned:
+                token = cleaned
+                break
+        if token and token.upper() != word.strip().upper():
+            hint = f"Often described as {token.lower()}."
+        else:
+            hint = _fallback_descriptor(word)
         _hint_cache[cache_key] = hint
         return hint
 
@@ -708,8 +1151,23 @@ def submit_guess(run_id: str, payload: GuessIn):
     if not _ranker:
         raise HTTPException(status_code=503, detail="Embedding model unavailable.")
 
+    prev_best_rank = rs.best_rank
+    prev_guess_count = len(rs.guesses)
     rs = gm.submit_guess(run_id, guess)
     response = run_state_to_dict(rs)
+    if rs.momentum_bonus_active and len(rs.guesses) > prev_guess_count:
+        improved = prev_best_rank is None or (
+            rs.best_rank is not None and rs.best_rank < prev_best_rank
+        )
+        if improved:
+            time_bonus = int(rs.momentum_bonus_value or 0)
+            if time_bonus > 0:
+                response["time_bonus_seconds"] = time_bonus
+                if rs.last_effect_messages is None:
+                    rs.last_effect_messages = []
+                rs.last_effect_messages.append(f"+{time_bonus} seconds (momentum bonus).")
+        rs.momentum_bonus_active = False
+        rs.momentum_bonus_value = 0
     if rs.last_effect_messages:
         response["effect_messages"] = rs.last_effect_messages
     rs.last_effect_messages = []
@@ -722,12 +1180,41 @@ def skip_level(run_id: str):
     return run_state_to_dict(rs)
 
 
-@app.post("/api/run/{run_id}/choose_powerup")
-def choose_powerup(run_id: str, payload: PowerupChoiceIn):
-    rs, chosen = gm.choose_powerup(run_id, payload.powerup_id)
+@app.post("/api/run/{run_id}/fail")
+def fail_run(run_id: str):
+    try:
+        rs = gm.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found.") from exc
+    messages = []
+    if rs.skip_insurance_active:
+        rs.last_skip_level = -999
+        rs.skip_insurance_active = False
+        messages.append("Skip cooldown reset.")
+    if rs.safety_net_levels > 0:
+        rs.safety_net_levels = 0
+        gm._advance_level(rs, completed=False)
+        messages.append("Safety Net saved your run.")
+        return {
+            "state": run_state_to_dict(rs),
+            "saved": True,
+            "messages": messages,
+        }
+    rs.failed_flag = True
     return {
         "state": run_state_to_dict(rs),
-        "added": chosen,
+        "saved": False,
+        "messages": messages,
+    }
+
+
+@app.post("/api/run/{run_id}/choose_powerup")
+def choose_powerup(run_id: str, payload: PowerupChoiceIn):
+    rs, chosen, message = gm.choose_powerup(run_id, payload.powerup_id)
+    return {
+        "state": run_state_to_dict(rs),
+        "added": chosen if chosen else None,
+        "message": message,
     }
 
 
@@ -763,16 +1250,98 @@ def use_powerup(run_id: str, payload: UsePowerupIn):
         return {"state": run_state_to_dict(rs), "used": None}
 
     powerup_id = chosen.get("id") or ""
-    if powerup_id == "time_burst":
-        time_bonus_seconds = chosen.get("value")
-        if time_bonus_seconds:
-            messages.append(f"+{time_bonus_seconds} seconds.")
-    elif powerup_id == "micro_pause":
+    if powerup_id == "semantic_direction":
+        if _is_random_concrete_word(rs.secret):
+            messages.append("This word represents something physical and tangible.")
+        else:
+            messages.append("This word is more abstract than physical.")
+    elif powerup_id == "concept_neighbor":
+        related_word = generate_related_word(rs.secret, THEMES_BY_ID.get(rs.theme_id))
+        if related_word:
+            messages.append(f"Related concept: {related_word}.")
+        else:
+            messages.append("No related concept available.")
+    elif powerup_id == "functional_hint":
+        hint = generate_hint(rs.secret, "functional", THEMES_BY_ID.get(rs.theme_id))
+        if hint:
+            messages.append(hint)
+        else:
+            messages.append("No functional hint available.")
+    elif powerup_id == "descriptor_hint":
+        hint = generate_hint(rs.secret, "descriptor", THEMES_BY_ID.get(rs.theme_id))
+        if hint:
+            messages.append(hint)
+        else:
+            messages.append("No descriptor hint available.")
+    elif powerup_id == "undo_guess":
+        if rs.guesses:
+            rs.guesses.pop()
+            rs.best_rank = min((entry.rank for entry in rs.guesses), default=None)
+            messages.append("Last guess removed.")
+        else:
+            messages.append("No guesses to undo.")
+    elif powerup_id == "reroll_target":
+        gm.reroll_target(rs)
+        messages.append("Target rerolled. No reward for this level.")
+    elif powerup_id == "anchor_guess":
+        choice = (payload.choice or "").strip().upper()
+        if not choice:
+            messages.append("Select a guess to anchor.")
+        else:
+            match = next((entry for entry in rs.guesses if entry.word == choice), None)
+            if not match:
+                messages.append("Anchor must be one of your guesses.")
+            else:
+                rs.anchor_word = match.word
+                rs.anchor_rank = match.rank
+                messages.append(f"Anchor set to {match.word}.")
+    elif powerup_id == "similarity_reveal":
+        count = int(chosen.get("value") or 0)
+        if count > 0:
+            rs.similarity_reveal_remaining = max(rs.similarity_reveal_remaining, count)
+            messages.append(f"Similarity revealed for the next {count} guesses.")
+    elif powerup_id == "comparator":
+        choices = payload.choices or []
+        normalized = [choice.strip().upper() for choice in choices if choice]
+        unique = []
+        for choice in normalized:
+            if choice not in unique:
+                unique.append(choice)
+        if len(unique) != 2:
+            messages.append("Select two guesses to compare.")
+        else:
+            first = next((entry for entry in rs.guesses if entry.word == unique[0]), None)
+            second = next((entry for entry in rs.guesses if entry.word == unique[1]), None)
+            if not first or not second:
+                messages.append("Both selections must be previous guesses.")
+            elif first.rank < second.rank:
+                messages.append(f"{first.word} is closer than {second.word}.")
+            elif first.rank > second.rank:
+                messages.append(f"{second.word} is closer than {first.word}.")
+            else:
+                messages.append(f"{first.word} and {second.word} are equally close.")
+    elif powerup_id == "gradient_scan":
+        if rs.best_rank is None:
+            messages.append("Make a guess to scan the gradient.")
+        else:
+            total = max(1, len(WORDS))
+            ratio = rs.best_rank / total
+            if ratio <= 0.1:
+                messages.append("Target feels near the top of your semantic space.")
+            elif ratio <= 0.4:
+                messages.append("Target feels closer to the middle of your semantic space.")
+            else:
+                messages.append("Target feels deeper toward the bottom of your semantic space.")
+    elif powerup_id == "micro_freeze":
         timer_freeze_seconds = 2
-        messages.append("Micro Pause activated.")
-    elif powerup_id == "slow_time":
+        messages.append("Micro Freeze activated.")
+    elif powerup_id == "slow_drain":
         timer_slow_seconds = 10
-        messages.append("Slow Time activated.")
+        messages.append("Slow Drain activated.")
+    elif powerup_id == "momentum_bonus":
+        rs.momentum_bonus_active = True
+        rs.momentum_bonus_value = int(chosen.get("value") or 0)
+        messages.append("Momentum Bonus armed. Beat your best rank to gain time.")
     elif powerup_id == "skip_cooldown_reducer":
         rs.skip_cooldown_reduction_value = max(rs.skip_cooldown_reduction_value, 1)
         rs.skip_cooldown_reduction_levels = max(rs.skip_cooldown_reduction_levels, 5)
@@ -780,27 +1349,22 @@ def use_powerup(run_id: str, payload: UsePowerupIn):
     elif powerup_id == "skip_refresh":
         rs.last_skip_level = -999
         messages.append("Skip is ready.")
-    elif powerup_id == "similarity_reveal":
-        count = int(chosen.get("value") or 0)
-        if count > 0:
-            rs.similarity_reveal_remaining = max(rs.similarity_reveal_remaining, count)
-            messages.append(f"Similarity revealed for the next {count} guesses.")
-    elif powerup_id == "undo_last_guess":
-        if rs.guesses:
-            rs.guesses.pop()
-            rs.best_rank = min((entry.rank for entry in rs.guesses), default=None)
-            messages.append("Last guess removed.")
+    elif powerup_id == "skip_insurance":
+        rs.skip_insurance_active = True
+        messages.append("Skip insurance armed for the next level.")
+    elif powerup_id == "expanded_choice":
+        rs.expanded_choice_levels = max(rs.expanded_choice_levels, 1)
+        messages.append("Next reward will offer 4 options.")
+    elif powerup_id == "reroll_rewards":
+        if rs.pending_powerups:
+            desired = len(rs.pending_powerups)
+            rs.pending_powerups = gm._roll_powerups(rs, count=desired, consume_expanded=False)
+            messages.append("Reward options rerolled.")
         else:
-            messages.append("No guesses to undo.")
-
-    if chosen and chosen.get("type") == "hint":
-        hint_type = chosen.get("value") or "definition"
-        if hint_type == "related":
-            related_word = generate_related_word(rs.secret, THEMES_BY_ID.get(rs.theme_id))
-            if not related_word:
-                messages.append("No related word available.")
-        else:
-            hint = generate_hint(rs.secret, hint_type, THEMES_BY_ID.get(rs.theme_id))
+            messages.append("No rewards to reroll.")
+    elif powerup_id == "safety_net":
+        rs.safety_net_levels = max(rs.safety_net_levels, 3)
+        messages.append("Safety Net armed for the next 3 levels.")
 
     return {
         "state": run_state_to_dict(rs),
@@ -829,7 +1393,8 @@ def get_run_hint(run_id: str, payload: RunHintIn):
         rs = gm.get_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found.") from exc
-    hint = generate_hint(rs.secret, payload.hint_type or "context", THEMES_BY_ID.get(rs.theme_id))
+    theme = None if rs.is_random_mode else THEMES_BY_ID.get(rs.theme_id)
+    hint = generate_hint(rs.secret, payload.hint_type or "context", theme)
     return {"hint": hint}
 
 
@@ -852,6 +1417,26 @@ def validation_status():
         "embedding_model": EMBEDDING_MODEL,
         "embedding_error": embedding_error,
     }
+
+
+@app.get("/api/random/backgrounds")
+def list_random_backgrounds():
+    candidates = [
+        (BASE_DIR / ".." / "Front End" / "public" / "random").resolve(),
+        (BASE_DIR / ".." / "static" / "random").resolve(),
+        (BASE_DIR / "static" / "random").resolve(),
+    ]
+    random_dir = next((path for path in candidates if path.exists()), None)
+    if not random_dir:
+        return {"backgrounds": []}
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    files = [
+        p.name
+        for p in random_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in exts
+    ]
+    files.sort()
+    return {"backgrounds": [f"/random/{name}" for name in files]}
 
 
 # Serve frontend files if built assets are present

@@ -1,5 +1,6 @@
+import { useEffect, useRef } from 'react';
 import { motion } from 'motion/react';
-import { Trophy, TrendingUp, Zap } from 'lucide-react';
+import { Hash, Trophy, TrendingUp, Zap } from 'lucide-react';
 
 type Theme = {
   id: string;
@@ -18,7 +19,10 @@ interface StartScreenProps {
     gamesPlayed: number;
     gamesWon: number;
     currentStreak: number;
+    score: number;
   };
+  onSaveScore: () => void;
+  onResetScore: () => void;
 }
 
 export function StartScreen({
@@ -29,12 +33,53 @@ export function StartScreen({
   onSelectTheme,
   startError,
   startLoading,
+  onSaveScore,
+  onResetScore,
 }: StartScreenProps) {
   const winRate = stats.gamesPlayed > 0
     ? Math.round((stats.gamesWon / stats.gamesPlayed) * 100)
     : 0;
   const requiresTheme = themes.length > 0;
   const canStart = !requiresTheme || Boolean(selectedThemeId);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const menuVideoSrc = '/menu-bg.mp4';
+
+  const attemptPlay = () => {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.loop = true;
+    const result = video.play();
+    if (result && typeof result.catch === 'function') {
+      result.catch(() => {});
+    }
+  };
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.muted = true;
+      video.defaultMuted = true;
+      video.playsInline = true;
+      video.autoplay = true;
+    }
+    const handleCanPlay = () => attemptPlay();
+    video?.addEventListener('canplay', handleCanPlay);
+    attemptPlay();
+    const handleUserGesture = () => attemptPlay();
+    document.addEventListener('pointerdown', handleUserGesture, { once: true });
+    document.addEventListener('keydown', handleUserGesture, { once: true });
+    return () => {
+      video?.removeEventListener('canplay', handleCanPlay);
+      document.removeEventListener('pointerdown', handleUserGesture);
+      document.removeEventListener('keydown', handleUserGesture);
+    };
+  }, []);
 
   return (
     <div className="menu-screen">
@@ -46,13 +91,14 @@ export function StartScreen({
         <div className="menu-art">
           <video
             className="menu-art-media"
+            ref={videoRef}
             autoPlay
             muted
             loop
             playsInline
-            poster="/menu-bg.png"
-          >
-            <source src="/menu-bg.mp4" type="video/mp4" />
+            preload="auto"
+            >
+            <source src={menuVideoSrc} type="video/mp4" />
           </video>
           <button
             onClick={onStart}
@@ -67,7 +113,7 @@ export function StartScreen({
 
         {startError && <div className="menu-error">{startError}</div>}
 
-        {stats.gamesPlayed > 0 && (
+        {(stats.gamesPlayed > 0 || stats.score > 0) && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -97,7 +143,26 @@ export function StartScreen({
               </div>
               <p className="text-xs text-gray-400">Streak</p>
             </div>
+
+            <div className="bg-card/50 rounded-lg p-4 border border-primary/30 text-center">
+              <div className="flex items-center justify-center gap-1 mb-1">
+                <Hash className="w-4 h-4 text-sky-400" />
+                <span className="text-white">{stats.score}</span>
+              </div>
+              <p className="text-xs text-gray-400">Completed Guesses</p>
+            </div>
           </motion.div>
+        )}
+
+        {(stats.gamesPlayed > 0 || stats.score > 0) && (
+          <div className="menu-score-actions">
+            <button type="button" className="menu-score-button" onClick={onSaveScore}>
+              Save Score
+            </button>
+            <button type="button" className="menu-score-button menu-score-button--reset" onClick={onResetScore}>
+              Reset Score
+            </button>
+          </div>
         )}
 
         {themes.length > 0 && (

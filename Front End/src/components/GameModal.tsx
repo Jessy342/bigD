@@ -1,4 +1,4 @@
-import { Trophy, XCircle, TrendingUp, Zap, RotateCcw, Timer, Hash, Target } from 'lucide-react';
+import { Trophy, TrendingUp, Zap, RotateCcw, Timer, Hash, Target } from 'lucide-react';
 import { motion } from 'motion/react';
 
 interface GameModalProps {
@@ -50,7 +50,7 @@ export function GameModal({
             transition={{ delay: 0.2, type: 'spring', stiffness: 200 }}
             className="w-20 h-20 rounded-full flex items-center justify-center mb-4 bg-gradient-to-br from-[#ef4444] to-[#dc2626] shadow-lg shadow-[#ef4444]/50"
           >
-            <XCircle className="w-10 h-10 text-white" />
+            <img src="/gameover.png" alt="Game over" className="w-12 h-12 object-contain" />
           </motion.div>
 
           <motion.h2
