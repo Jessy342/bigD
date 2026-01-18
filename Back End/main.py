@@ -193,7 +193,13 @@ EASY_WORDS = load_easy_words(WORDS)
 THEMES_BY_ID = {theme["id"]: theme for theme in THEMES}
 DEFAULT_THEME_ID = THEMES[0]["id"] if THEMES else ""
 
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+LOW_MEMORY_MODE = os.getenv("LOW_MEMORY_MODE", "false").lower() in ("1", "true", "yes")
+DEFAULT_EMBEDDING_MODEL = (
+    "sentence-transformers/paraphrase-MiniLM-L3-v2"
+    if LOW_MEMORY_MODE
+    else "sentence-transformers/all-MiniLM-L6-v2"
+)
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
 embedding_error = ""
 _ranker = None
 try:

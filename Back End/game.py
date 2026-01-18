@@ -20,9 +20,12 @@ DEFAULT_MAX_GUESSES = 6
 INVENTORY_CAPACITY = int(os.getenv("INVENTORY_CAPACITY", "3"))
 ALLOW_DUPLICATE_POWERUPS: set[str] = set()
 
+LOW_MEMORY_MODE = os.getenv("LOW_MEMORY_MODE", "false").lower() in ("1", "true", "yes")
+
 BOSS_LEVEL_INTERVAL = int(os.getenv("BOSS_LEVEL_INTERVAL", "5"))
 DEFAULT_SKIP_COOLDOWN_LEVELS = int(os.getenv("SKIP_COOLDOWN_LEVELS", "3"))
-CANDIDATE_WORD_LIMIT = int(os.getenv("CANDIDATE_WORD_LIMIT", "20000"))
+DEFAULT_CANDIDATE_WORD_LIMIT = "6000" if LOW_MEMORY_MODE else "20000"
+CANDIDATE_WORD_LIMIT = int(os.getenv("CANDIDATE_WORD_LIMIT", DEFAULT_CANDIDATE_WORD_LIMIT))
 MIN_WORD_LEN = int(os.getenv("MIN_WORD_LEN", "3"))
 MAX_WORD_LEN = int(os.getenv("MAX_WORD_LEN", "12"))
 EASY_WORD_LIMIT = int(os.getenv("EASY_WORD_LIMIT", "800"))
@@ -229,7 +232,8 @@ def load_words(path: str) -> List[str]:
     words.extend(_load_words_from_wordfreq(MIN_WORD_LEN, MAX_WORD_LEN, CANDIDATE_WORD_LIMIT))
     words.extend(_load_words_from_env(MIN_WORD_LEN, MAX_WORD_LEN))
     words.extend(_load_words_from_file(p, MIN_WORD_LEN, MAX_WORD_LEN))
-    words.extend(_load_words_from_file(p.parent / "words_5.txt", MIN_WORD_LEN, MAX_WORD_LEN))
+    if not LOW_MEMORY_MODE:
+        words.extend(_load_words_from_file(p.parent / "words_5.txt", MIN_WORD_LEN, MAX_WORD_LEN))
     words.extend(DEFAULT_EASY_WORDS)
     words = _dedupe_preserve(words)
     if not words:

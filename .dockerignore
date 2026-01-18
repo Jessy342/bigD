@@ -1,6 +1,7 @@
 # Frontend
 Front End/node_modules
 Front End/dist
+Front End/build
 Front End/.vite
 
 # Backend
@@ -8,5 +9,13 @@ Back End/__pycache__
 Back End/.venv
 
 # General
+**/node_modules
+**/.venv
 **/__pycache__
 **/*.pyc
+.git
+dist
+build
+*.log
+.env
+.DS_Store
